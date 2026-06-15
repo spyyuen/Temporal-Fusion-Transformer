@@ -1,19 +1,18 @@
-import os
 from pathlib import Path
+from io import StringIO
 
+import numpy as np
 import pandas as pd
+import requests
 import yfinance as yf
 
-from fredapi import Fred
 
+# =====================================================
+# CONFIG
+# =====================================================
 
 DATA_DIR = Path("macro_data")
 DATA_DIR.mkdir(exist_ok=True)
-
-
-# -----------------------------------
-# Yahoo Finance
-# -----------------------------------
 
 YF_TICKERS = {
     "spx": "^GSPC",
@@ -22,26 +21,21 @@ YF_TICKERS = {
     "dxy": "DX-Y.NYB",
 }
 
-
-# -----------------------------------
-# FRED
-# -----------------------------------
-
 FRED_SERIES = {
     "us2y": "DGS2",
     "yield_curve": "T10Y2Y",
 }
 
 
-# -----------------------------------
-# Download Yahoo
-# -----------------------------------
+# =====================================================
+# YAHOO DOWNLOAD
+# =====================================================
 
 def download_yahoo(
-        ticker,
-        start,
-        end
-):
+        ticker: str,
+        start: str,
+        end: str
+) -> pd.DataFrame:
 
     print(f"Downloading {ticker}")
 
@@ -53,76 +47,100 @@ def download_yahoo(
         progress=False
     )
 
-    if len(df) == 0:
+    if df.empty:
         raise ValueError(
-            f"No data for {ticker}"
+            f"No data returned for {ticker}"
         )
+
+    # Flatten MultiIndex columns if needed
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
 
     df = df.reset_index()
 
+    timestamp_col = (
+        "Datetime"
+        if "Datetime" in df.columns
+        else "Date"
+    )
+
     df = df.rename(
         columns={
-            "Date": "timestamp",
-            "Datetime": "timestamp",
+            timestamp_col: "timestamp",
             "Close": "close",
         }
     )
 
-    return df[[
-        "timestamp",
-        "close"
-    ]]
+    return df[
+        ["timestamp", "close"]
+    ]
 
 
-# -----------------------------------
-# Download FRED
-# -----------------------------------
+# =====================================================
+# FRED DOWNLOAD
+# =====================================================
 
 def download_fred(
-        fred,
-        series_id,
-        start,
-        end
-):
+        series_id: str,
+        start: str,
+        end: str
+) -> pd.DataFrame:
 
     print(
         f"Downloading FRED {series_id}"
     )
 
-    s = fred.get_series(
-        series_id,
-        observation_start=start,
-        observation_end=end
+    url = (
+        "https://fred.stlouisfed.org/"
+        f"graph/fredgraph.csv?id={series_id}"
     )
 
-    df = pd.DataFrame({
-        "timestamp": s.index,
-        "value": s.values
-    })
+    response = requests.get(
+        url,
+        timeout=30
+    )
+
+    response.raise_for_status()
+
+    df = pd.read_csv(
+        StringIO(response.text)
+    )
+
+    df.columns = [
+        "timestamp",
+        "value"
+    ]
+
+    df["timestamp"] = pd.to_datetime(
+        df["timestamp"]
+    )
+
+    start_ts = pd.Timestamp(start)
+    end_ts = pd.Timestamp(end)
+
+    df = df[
+        (df["timestamp"] >= start_ts)
+        &
+        (df["timestamp"] <= end_ts)
+        ]
 
     return df
 
 
-# -----------------------------------
-# Main
-# -----------------------------------
+# =====================================================
+# BUILD DATASET
+# =====================================================
 
 def build_macro_dataset(
-        start,
-        end
-):
+        start: str,
+        end: str
+) -> pd.DataFrame:
 
-    fred = Fred(
-        api_key=os.environ[
-            "FRED_API_KEY"
-        ]
-    )
+    all_dfs = []
 
-    merged = None
-
-    # ----------------------------
-    # Yahoo assets
-    # ----------------------------
+    # -----------------------------------------
+    # Yahoo Assets
+    # -----------------------------------------
 
     for name, ticker in YF_TICKERS.items():
 
@@ -138,27 +156,22 @@ def build_macro_dataset(
             }
         )
 
-        if merged is None:
+        df["timestamp"] = pd.to_datetime(
+            df["timestamp"],
+            utc=True
+        )
 
-            merged = df
+        all_dfs.append(
+            df.set_index("timestamp")
+        )
 
-        else:
-
-            merged = pd.merge(
-                merged,
-                df,
-                on="timestamp",
-                how="outer"
-            )
-
-    # ----------------------------
-    # FRED assets
-    # ----------------------------
+    # -----------------------------------------
+    # FRED Assets
+    # -----------------------------------------
 
     for name, series in FRED_SERIES.items():
 
         df = download_fred(
-            fred,
             series,
             start,
             end
@@ -170,20 +183,29 @@ def build_macro_dataset(
             }
         )
 
-        merged = pd.merge(
-            merged,
-            df,
-            on="timestamp",
-            how="outer"
+        df["timestamp"] = pd.to_datetime(
+            df["timestamp"],
+            utc=True
         )
 
-    # ----------------------------
-    # Clean
-    # ----------------------------
+        all_dfs.append(
+            df.set_index("timestamp")
+        )
 
-    merged["timestamp"] = pd.to_datetime(
-        merged["timestamp"],
-        utc=True
+    # -----------------------------------------
+    # Merge
+    # -----------------------------------------
+
+    print("Combining datasets...")
+
+    merged = (
+        pd.concat(
+            all_dfs,
+            axis=1,
+            sort=True
+        )
+        .sort_index()
+        .reset_index()
     )
 
     merged = merged.sort_values(
@@ -192,9 +214,13 @@ def build_macro_dataset(
 
     merged = merged.ffill()
 
-    # ----------------------------
-    # Derived Macro Features
-    # ----------------------------
+    # -----------------------------------------
+    # Derived Features
+    # -----------------------------------------
+
+    print(
+        "Creating macro features..."
+    )
 
     merged["spx_ret"] = (
         merged["spx"]
@@ -221,30 +247,81 @@ def build_macro_dataset(
         .pct_change()
     )
 
-    # strongest macro signal
-
     merged["yield_spread"] = (
         merged["yield_curve"]
     )
 
-    # additional useful feature
-
     merged["risk_regime"] = (
-        (
-                merged["vix"]
-                > merged["vix"]
-                .rolling(50)
-                .mean()
+            merged["vix"]
+            >
+            merged["vix"]
+            .rolling(50)
+            .mean()
+    ).astype(int)
+
+    merged["spx_vix_corr"] = (
+        merged["spx_ret"]
+        .rolling(20)
+        .corr(
+            merged["vix_change"]
         )
-        .astype(int)
     )
 
-    # ----------------------------
+    merged["spx_momentum_20"] = (
+            merged["spx"]
+            /
+            merged["spx"].shift(20)
+            - 1
+    )
+
+    merged["eustoxx_momentum_20"] = (
+            merged["eustoxx"]
+            /
+            merged["eustoxx"].shift(20)
+            - 1
+    )
+
+    merged["dxy_momentum_20"] = (
+            merged["dxy"]
+            /
+            merged["dxy"].shift(20)
+            - 1
+    )
+
+    merged["vix_zscore"] = (
+            (
+                    merged["vix"]
+                    -
+                    merged["vix"]
+                    .rolling(100)
+                    .mean()
+            )
+            /
+            merged["vix"]
+            .rolling(100)
+            .std()
+    )
+
+    # -----------------------------------------
+    # Cleanup
+    # -----------------------------------------
+
+    merged = merged.replace(
+        [np.inf, -np.inf],
+        np.nan
+    )
+
+    merged = merged.ffill()
+
+    merged = merged.dropna()
+
+    # -----------------------------------------
     # Save
-    # ----------------------------
+    # -----------------------------------------
 
     outfile = (
-            DATA_DIR /
+            DATA_DIR
+            /
             f"macro_{start}_{end}.parquet"
     )
 
@@ -253,12 +330,17 @@ def build_macro_dataset(
         index=False
     )
 
-    print(
-        f"Saved {outfile}"
-    )
+    print()
+    print(f"Saved: {outfile}")
+    print(f"Rows: {len(merged):,}")
+    print(f"Columns: {len(merged.columns)}")
 
     return merged
 
+
+# =====================================================
+# MAIN
+# =====================================================
 
 if __name__ == "__main__":
 

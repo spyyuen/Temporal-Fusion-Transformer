@@ -18,9 +18,7 @@ The objective is to predict risk-adjusted future EURUSD returns and generate sys
 
 # Installation
 
-pip install yfinance pandas pyarrow fredapi requests
-Get a free FRED API key from: https://fred.stlouisfed.org/docs/api/api_key.html
-Bash: export FRED_API_KEY="YOUR_KEY"
+pip install pandas numpy yfinance requests pyarrow
 
 ---
 
