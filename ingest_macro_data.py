@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import requests
 import yfinance as yf
+import time
 
 
 # =====================================================
@@ -79,6 +80,11 @@ def download_yahoo(
 # =====================================================
 # FRED DOWNLOAD
 # =====================================================
+import os
+import time
+import requests
+import pandas as pd
+
 
 def download_fred(
         series_id: str,
@@ -90,41 +96,92 @@ def download_fred(
         f"Downloading FRED {series_id}"
     )
 
+    api_key = os.environ.get(
+        "FRED_API_KEY"
+    )
+
+    if not api_key:
+        raise ValueError(
+            "FRED_API_KEY environment variable not set"
+        )
+
     url = (
-        "https://fred.stlouisfed.org/"
-        f"graph/fredgraph.csv?id={series_id}"
+        "https://api.stlouisfed.org/"
+        "fred/series/observations"
     )
 
-    response = requests.get(
-        url,
-        timeout=30
+    params = {
+        "series_id": series_id,
+        "api_key": api_key,
+        "file_type": "json",
+        "observation_start": start,
+        "observation_end": end,
+    }
+
+    last_error = None
+
+    for attempt in range(5):
+
+        try:
+
+            response = requests.get(
+                url,
+                params=params,
+                timeout=120
+            )
+
+            response.raise_for_status()
+
+            data = response.json()
+
+            observations = data[
+                "observations"
+            ]
+
+            df = pd.DataFrame(
+                observations
+            )
+
+            if df.empty:
+
+                raise ValueError(
+                    f"No observations returned for {series_id}"
+                )
+
+            df = df[
+                ["date", "value"]
+            ]
+
+            df.columns = [
+                "timestamp",
+                "value"
+            ]
+
+            df["timestamp"] = pd.to_datetime(
+                df["timestamp"]
+            )
+
+            df["value"] = pd.to_numeric(
+                df["value"],
+                errors="coerce"
+            )
+
+            return df
+
+        except Exception as e:
+
+            last_error = e
+
+            print(
+                f"Attempt {attempt+1}/5 failed for {series_id}: {e}"
+            )
+
+            if attempt < 4:
+                time.sleep(5)
+
+    raise RuntimeError(
+        f"Failed downloading {series_id}: {last_error}"
     )
-
-    response.raise_for_status()
-
-    df = pd.read_csv(
-        StringIO(response.text)
-    )
-
-    df.columns = [
-        "timestamp",
-        "value"
-    ]
-
-    df["timestamp"] = pd.to_datetime(
-        df["timestamp"]
-    )
-
-    start_ts = pd.Timestamp(start)
-    end_ts = pd.Timestamp(end)
-
-    df = df[
-        (df["timestamp"] >= start_ts)
-        &
-        (df["timestamp"] <= end_ts)
-        ]
-
-    return df
 
 
 # =====================================================
