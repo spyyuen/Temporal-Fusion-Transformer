@@ -2,7 +2,7 @@ import argparse
 import subprocess
 from pathlib import Path
 from pathlib import Path
-from ingest_macro_data import build_macro_dataset as ingest_macro
+from ingest_macro_data import build_macro_dataset, build_fx_dataset
 from temporal_fusion_transformer import run as train_tft
 
 # =====================================================
@@ -107,6 +107,10 @@ def main():
             print(
                 f"[CACHE HIT] {macro_path}"
             )
+
+    if args.backfill or not Path("data/fx.parquet").exists():
+
+        build_fx_dataset()
 
     # -------------------------------------------------
     # TRAINING STEP

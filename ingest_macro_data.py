@@ -15,6 +15,14 @@ import time
 DATA_DIR = Path("macro_data")
 DATA_DIR.mkdir(exist_ok=True)
 
+PROJECT_ROOT = Path(__file__).resolve().parent
+
+FX_CACHE_DIR = (
+        PROJECT_ROOT.parent
+        / "Neural-Spot-FX-Alpha-Model"
+        / "data"
+)
+
 YF_TICKERS = {
     "spx": "^GSPC",
     "eustoxx": "^STOXX50E",
@@ -80,12 +88,6 @@ def download_yahoo(
 # =====================================================
 # FRED DOWNLOAD
 # =====================================================
-import os
-import time
-import requests
-import pandas as pd
-
-
 def download_fred(
         series_id: str,
         start: str,
@@ -394,6 +396,94 @@ def build_macro_dataset(
 
     return merged
 
+def build_fx_dataset():
+
+    project_root = Path(__file__).resolve().parent
+
+    local_data_dir = project_root / "data"
+
+    local_data_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    # Search locations
+    search_dirs = [
+        local_data_dir,
+        project_root.parent / "Neural-Spot-FX-Alpha-Model" / "data",
+        ]
+
+    files = []
+
+    for directory in search_dirs:
+
+        if not directory.exists():
+            continue
+
+        matches = sorted(
+            directory.glob("EURUSD_*.parquet")
+        )
+
+        if matches:
+
+            print(
+                f"Found {len(matches)} EURUSD files in {directory}"
+            )
+
+            files.extend(matches)
+
+    if not files:
+
+        raise RuntimeError(
+            """
+No EURUSD parquet files found.
+
+Searched:
+
+Temporal-Fusion-Transformer/data
+Neural-Spot-FX-Alpha-Model/data
+"""
+        )
+
+    dfs = []
+
+    for file in files:
+
+        print(f"Loading {file}")
+
+        dfs.append(
+            pd.read_parquet(file)
+        )
+
+    fx = (
+        pd.concat(
+            dfs,
+            ignore_index=True
+        )
+        .sort_values("timestamp")
+        .drop_duplicates(
+            subset="timestamp"
+        )
+    )
+
+    output_file = (
+            local_data_dir / "fx.parquet"
+    )
+
+    fx.to_parquet(
+        output_file,
+        index=False
+    )
+
+    print()
+    print(
+        f"[FX CACHE CREATED] {output_file}"
+    )
+    print(
+        f"Rows: {len(fx):,}"
+    )
+
+    return output_file
 
 # =====================================================
 # MAIN
