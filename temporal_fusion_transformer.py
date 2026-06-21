@@ -25,6 +25,12 @@ import pandas as pd
 import torch
 import torch.nn as nn
 
+def clean_time_index(df):
+    df = df.copy()
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
+    df = df.dropna(subset=["timestamp"])
+    return df.sort_values("timestamp")
+
 # ======================================
 # FEATURE ENGINEERING
 # ======================================
@@ -370,11 +376,13 @@ def run(
     # ALIGN DATA
     # -------------------------------------------------
 
-    fx["timestamp"] = pd.to_datetime(fx["timestamp"], utc=True)
-    macro["timestamp"] = pd.to_datetime(macro["timestamp"], utc=True)
+    fx["timestamp"] = pd.to_datetime(fx["timestamp"], format="ISO8601", errors="coerce", utc=True)
+    macro["timestamp"] = pd.to_datetime(macro["timestamp"], format="ISO8601", errors="coerce", utc=True)
 
     fx = fx.sort_values("timestamp")
     macro = macro.sort_values("timestamp")
+    fx = clean_time_index(fx)
+    macro = clean_time_index(macro)
 
     df = pd.merge_asof(
         fx,

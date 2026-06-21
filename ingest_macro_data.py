@@ -1,23 +1,25 @@
 from pathlib import Path
-from io import StringIO
-
 import numpy as np
 import pandas as pd
 import requests
 import yfinance as yf
 import time
-
+import os
 
 # =====================================================
 # CONFIG
 # =====================================================
 
-DATA_DIR = Path("macro_data")
-DATA_DIR.mkdir(exist_ok=True)
-
 PROJECT_ROOT = Path(__file__).resolve().parent
 
-FX_CACHE_DIR = (
+DATA_DIR = PROJECT_ROOT / "macro_data"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+FX_LOCAL_DIR = PROJECT_ROOT / "data"
+FX_LOCAL_DIR.mkdir(parents=True, exist_ok=True)
+
+# fallback external repo (your old dataset location)
+FX_EXTERNAL_DIR = (
         PROJECT_ROOT.parent
         / "Neural-Spot-FX-Alpha-Model"
         / "data"
@@ -40,11 +42,7 @@ FRED_SERIES = {
 # YAHOO DOWNLOAD
 # =====================================================
 
-def download_yahoo(
-        ticker: str,
-        start: str,
-        end: str
-) -> pd.DataFrame:
+def download_yahoo(ticker: str, start: str, end: str) -> pd.DataFrame:
 
     print(f"Downloading {ticker}")
 
@@ -57,60 +55,36 @@ def download_yahoo(
     )
 
     if df.empty:
-        raise ValueError(
-            f"No data returned for {ticker}"
-        )
+        raise ValueError(f"No data returned for {ticker}")
 
-    # Flatten MultiIndex columns if needed
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
     df = df.reset_index()
 
-    timestamp_col = (
-        "Datetime"
-        if "Datetime" in df.columns
-        else "Date"
-    )
+    ts_col = "Datetime" if "Datetime" in df.columns else "Date"
 
-    df = df.rename(
-        columns={
-            timestamp_col: "timestamp",
-            "Close": "close",
-        }
-    )
+    df = df.rename(columns={
+        ts_col: "timestamp",
+        "Close": "close"
+    })
 
-    return df[
-        ["timestamp", "close"]
-    ]
+    return df[["timestamp", "close"]]
 
 
 # =====================================================
 # FRED DOWNLOAD
 # =====================================================
-def download_fred(
-        series_id: str,
-        start: str,
-        end: str
-) -> pd.DataFrame:
 
-    print(
-        f"Downloading FRED {series_id}"
-    )
+def download_fred(series_id: str, start: str, end: str) -> pd.DataFrame:
 
-    api_key = os.environ.get(
-        "FRED_API_KEY"
-    )
+    print(f"Downloading FRED {series_id}")
 
+    api_key = os.environ.get("FRED_API_KEY")
     if not api_key:
-        raise ValueError(
-            "FRED_API_KEY environment variable not set"
-        )
+        raise ValueError("Missing FRED_API_KEY environment variable")
 
-    url = (
-        "https://api.stlouisfed.org/"
-        "fred/series/observations"
-    )
+    url = "https://api.stlouisfed.org/fred/series/observations"
 
     params = {
         "series_id": series_id,
@@ -125,368 +99,187 @@ def download_fred(
     for attempt in range(5):
 
         try:
+            r = requests.get(url, params=params, timeout=120)
+            r.raise_for_status()
 
-            response = requests.get(
-                url,
-                params=params,
-                timeout=120
-            )
+            data = r.json()
+            obs = data["observations"]
 
-            response.raise_for_status()
-
-            data = response.json()
-
-            observations = data[
-                "observations"
-            ]
-
-            df = pd.DataFrame(
-                observations
-            )
-
+            df = pd.DataFrame(obs)
             if df.empty:
+                raise ValueError(f"No data for {series_id}")
 
-                raise ValueError(
-                    f"No observations returned for {series_id}"
-                )
+            df = df[["date", "value"]]
+            df.columns = ["timestamp", "value"]
 
-            df = df[
-                ["date", "value"]
-            ]
-
-            df.columns = [
-                "timestamp",
-                "value"
-            ]
-
-            df["timestamp"] = pd.to_datetime(
-                df["timestamp"]
-            )
-
-            df["value"] = pd.to_numeric(
-                df["value"],
-                errors="coerce"
-            )
+            df["timestamp"] = pd.to_datetime(df["timestamp"])
+            df["value"] = pd.to_numeric(df["value"], errors="coerce")
 
             return df
 
         except Exception as e:
-
             last_error = e
+            print(f"Retry {attempt+1}/5 failed: {e}")
+            time.sleep(5)
 
-            print(
-                f"Attempt {attempt+1}/5 failed for {series_id}: {e}"
-            )
-
-            if attempt < 4:
-                time.sleep(5)
-
-    raise RuntimeError(
-        f"Failed downloading {series_id}: {last_error}"
-    )
+    raise RuntimeError(f"FRED download failed: {series_id}: {last_error}")
 
 
 # =====================================================
-# BUILD DATASET
+# MACRO DATASET
 # =====================================================
 
-def build_macro_dataset(
-        start: str,
-        end: str
-) -> pd.DataFrame:
+def build_macro_dataset(start: str, end: str) -> str:
 
     all_dfs = []
 
-    # -----------------------------------------
-    # Yahoo Assets
-    # -----------------------------------------
-
+    # -------------------------
+    # Yahoo
+    # -------------------------
     for name, ticker in YF_TICKERS.items():
 
-        df = download_yahoo(
-            ticker,
-            start,
-            end
-        )
+        df = download_yahoo(ticker, start, end)
+        df = df.rename(columns={"close": name})
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
+        df = df.dropna(subset=["timestamp"])
 
-        df = df.rename(
-            columns={
-                "close": name
-            }
-        )
+        all_dfs.append(df.set_index("timestamp"))
 
-        df["timestamp"] = pd.to_datetime(
-            df["timestamp"],
-            utc=True
-        )
-
-        all_dfs.append(
-            df.set_index("timestamp")
-        )
-
-    # -----------------------------------------
-    # FRED Assets
-    # -----------------------------------------
-
+    # -------------------------
+    # FRED
+    # -------------------------
     for name, series in FRED_SERIES.items():
 
-        df = download_fred(
-            series,
-            start,
-            end
-        )
+        df = download_fred(series, start, end)
+        df = df.rename(columns={"value": name})
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
+        df = df.dropna(subset=["timestamp"])
 
-        df = df.rename(
-            columns={
-                "value": name
-            }
-        )
+        all_dfs.append(df.set_index("timestamp"))
 
-        df["timestamp"] = pd.to_datetime(
-            df["timestamp"],
-            utc=True
-        )
-
-        all_dfs.append(
-            df.set_index("timestamp")
-        )
-
-    # -----------------------------------------
-    # Merge
-    # -----------------------------------------
-
+    # -------------------------
+    # MERGE
+    # -------------------------
     print("Combining datasets...")
 
     merged = (
-        pd.concat(
-            all_dfs,
-            axis=1,
-            sort=True
-        )
+        pd.concat(all_dfs, axis=1, sort=True)
         .sort_index()
+        .ffill()
         .reset_index()
     )
 
-    merged = merged.sort_values(
-        "timestamp"
-    )
+    merged = merged.sort_values("timestamp")
 
-    merged = merged.ffill()
+    # -------------------------
+    # FEATURES
+    # -------------------------
+    print("Creating macro features...")
 
-    # -----------------------------------------
-    # Derived Features
-    # -----------------------------------------
+    merged["spx_ret"] = merged["spx"].pct_change()
+    merged["eustoxx_ret"] = merged["eustoxx"].pct_change()
+    merged["equity_relative"] = merged["eustoxx_ret"] - merged["spx_ret"]
 
-    print(
-        "Creating macro features..."
-    )
+    merged["vix_change"] = merged["vix"].pct_change()
+    merged["dxy_ret"] = merged["dxy"].pct_change()
 
-    merged["spx_ret"] = (
-        merged["spx"]
-        .pct_change()
-    )
-
-    merged["eustoxx_ret"] = (
-        merged["eustoxx"]
-        .pct_change()
-    )
-
-    merged["equity_relative"] = (
-            merged["eustoxx_ret"]
-            - merged["spx_ret"]
-    )
-
-    merged["vix_change"] = (
-        merged["vix"]
-        .pct_change()
-    )
-
-    merged["dxy_ret"] = (
-        merged["dxy"]
-        .pct_change()
-    )
-
-    merged["yield_spread"] = (
-        merged["yield_curve"]
-    )
+    merged["yield_spread"] = merged["yield_curve"]
 
     merged["risk_regime"] = (
-            merged["vix"]
-            >
-            merged["vix"]
-            .rolling(50)
-            .mean()
+            merged["vix"] > merged["vix"].rolling(50).mean()
     ).astype(int)
 
     merged["spx_vix_corr"] = (
-        merged["spx_ret"]
-        .rolling(20)
-        .corr(
-            merged["vix_change"]
-        )
+        merged["spx_ret"].rolling(20).corr(merged["vix_change"])
     )
 
-    merged["spx_momentum_20"] = (
-            merged["spx"]
-            /
-            merged["spx"].shift(20)
-            - 1
-    )
-
-    merged["eustoxx_momentum_20"] = (
-            merged["eustoxx"]
-            /
-            merged["eustoxx"].shift(20)
-            - 1
-    )
-
-    merged["dxy_momentum_20"] = (
-            merged["dxy"]
-            /
-            merged["dxy"].shift(20)
-            - 1
-    )
+    merged["spx_momentum_20"] = merged["spx"].pct_change(20)
+    merged["eustoxx_momentum_20"] = merged["eustoxx"].pct_change(20)
+    merged["dxy_momentum_20"] = merged["dxy"].pct_change(20)
 
     merged["vix_zscore"] = (
-            (
-                    merged["vix"]
-                    -
-                    merged["vix"]
-                    .rolling(100)
-                    .mean()
-            )
-            /
-            merged["vix"]
-            .rolling(100)
-            .std()
+            (merged["vix"] - merged["vix"].rolling(100).mean())
+            / merged["vix"].rolling(100).std()
     )
 
-    # -----------------------------------------
-    # Cleanup
-    # -----------------------------------------
+    merged = merged.replace([np.inf, -np.inf], np.nan).ffill().dropna()
 
-    merged = merged.replace(
-        [np.inf, -np.inf],
-        np.nan
-    )
+    # -------------------------
+    # SAVE
+    # -------------------------
+    outfile = DATA_DIR / f"macro_{start}_{end}.parquet"
 
-    merged = merged.ffill()
+    merged.to_parquet(outfile, index=False)
 
-    merged = merged.dropna()
-
-    # -----------------------------------------
-    # Save
-    # -----------------------------------------
-
-    outfile = (
-            DATA_DIR
-            /
-            f"macro_{start}_{end}.parquet"
-    )
-
-    merged.to_parquet(
-        outfile,
-        index=False
-    )
-
-    print()
-    print(f"Saved: {outfile}")
+    print(f"[MACRO CREATED] {outfile}")
     print(f"Rows: {len(merged):,}")
-    print(f"Columns: {len(merged.columns)}")
 
-    return merged
+    return str(outfile)
 
-def build_fx_dataset():
 
-    project_root = Path(__file__).resolve().parent
+def _normalize_timestamp(df: pd.DataFrame) -> pd.DataFrame:
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
+    df = df.dropna(subset=["timestamp"])
+    return df
 
-    local_data_dir = project_root / "data"
+# =====================================================
+# FX DATASET (ROBUST + CROSS PROJECT)
+# =====================================================
 
-    local_data_dir.mkdir(
-        parents=True,
-        exist_ok=True
-    )
+def build_fx_dataset() -> str:
 
-    # Search locations
+    print("Building FX dataset...")
+
     search_dirs = [
-        local_data_dir,
-        project_root.parent / "Neural-Spot-FX-Alpha-Model" / "data",
-        ]
+        FX_LOCAL_DIR,
+        FX_EXTERNAL_DIR
+    ]
 
     files = []
 
-    for directory in search_dirs:
+    for d in search_dirs:
 
-        if not directory.exists():
+        if not d.exists():
             continue
 
-        matches = sorted(
-            directory.glob("EURUSD_*.parquet")
-        )
+        matches = list(d.glob("EURUSD_*.parquet"))
 
         if matches:
-
-            print(
-                f"Found {len(matches)} EURUSD files in {directory}"
-            )
-
+            print(f"Found {len(matches)} files in {d}")
             files.extend(matches)
 
     if not files:
-
         raise RuntimeError(
-            """
-No EURUSD parquet files found.
-
-Searched:
-
-Temporal-Fusion-Transformer/data
-Neural-Spot-FX-Alpha-Model/data
-"""
+            "No EURUSD parquet files found in any known directory"
         )
 
     dfs = []
 
-    for file in files:
+    for f in sorted(files):
 
-        print(f"Loading {file}")
-
+        print(f"Loading {f}")
         dfs.append(
-            pd.read_parquet(file)
+            _normalize_timestamp(pd.read_parquet(file))
         )
 
     fx = (
-        pd.concat(
-            dfs,
-            ignore_index=True
-        )
+        pd.concat(dfs, ignore_index=True)
         .sort_values("timestamp")
-        .drop_duplicates(
-            subset="timestamp"
-        )
+        .drop_duplicates("timestamp")
     )
 
-    output_file = (
-            local_data_dir / "fx.parquet"
-    )
+    out = FX_LOCAL_DIR / "fx.parquet"
 
-    fx.to_parquet(
-        output_file,
-        index=False
-    )
+    fx.to_parquet(out, index=False)
 
-    print()
-    print(
-        f"[FX CACHE CREATED] {output_file}"
-    )
-    print(
-        f"Rows: {len(fx):,}"
-    )
+    print(f"[FX CACHE CREATED] {out}")
+    print(f"Rows: {len(fx):,}")
 
-    return output_file
+    return str(out)
+
 
 # =====================================================
-# MAIN
+# ENTRY
 # =====================================================
 
 if __name__ == "__main__":
