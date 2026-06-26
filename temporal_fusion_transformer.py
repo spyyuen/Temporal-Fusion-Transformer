@@ -11,6 +11,19 @@ import torch.nn as nn
 def load_data(fx_path: str, macro_path: str, max_rows: int = 2_000_000):
 
     fx = pd.read_parquet(fx_path)
+    fx = (
+        fx.set_index("timestamp")
+        .resample("1min")
+        .agg({
+            "bid": "last",
+            "ask": "last"
+        })
+        .dropna()
+        .reset_index()
+    )
+    # Keep every 100th tick
+    #fx = fx.iloc[::100].reset_index(drop=True)
+
     macro = pd.read_parquet(macro_path)
 
     # -------------------------------------------------
