@@ -306,27 +306,35 @@ def generate_signals(model, X, seq_len=120):
 # =====================================================
 # RUN ENTRYPOINT (USED BY __main__.py)
 # =====================================================
+def run(fx_path, macro_path, seq_len=120, epochs=20):
 
-def run(fx_path, macro_path, seq_len=120, epochs=10):
+    import pandas as pd
+    from dataset import build_dataset
+    from model import train_model   # or wherever your model is
 
     print("[RUN] Loading datasets...")
 
-    df = load_data(fx_path, macro_path)
+    fx = pd.read_parquet(fx_path)
+    macro = pd.read_parquet(macro_path)
 
-    print("[RUN] Creating features...")
+    print("[RUN] Building features + target...")
 
-    X, y = create_features(df)
+    X, y = build_dataset(fx, macro)
 
     print(f"[RUN] Dataset size: {len(X):,} rows")
 
+    # -----------------------------
+    # SAFETY LIMIT (IMPORTANT)
+    # -----------------------------
+    MAX_ROWS = 1_000_000
+
+    if len(X) > MAX_ROWS:
+        print(f"[WARN] Downsampling from {len(X):,} → {MAX_ROWS:,}")
+        X = X.iloc[-MAX_ROWS:]
+        y = y.iloc[-MAX_ROWS:]
+
     print("[RUN] Training model...")
 
-    model = train_model(X, y, epochs=epochs)
+    model = train_model(X, y, seq_len=seq_len, epochs=epochs)
 
-    signals = generate_signals(model, X, seq_len)
-
-    result = pd.DataFrame({
-        "signal": signals[-len(X):]
-    })
-
-    return model, result
+    return model, X

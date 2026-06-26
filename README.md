@@ -1,399 +1,108 @@
-# Temporal Fusion Transformer
+# Temporal Fusion Transformer FX + Macro Model
 
-A research framework for building machine learning-based alpha signals in the FX market using cross-asset information from equities, rates, volatility, and macroeconomic indicators.
+This project builds a **macro-driven FX trading model** using a simplified **Temporal Fusion Transformer (TFT)-inspired architecture**.
 
-This project combines:
+It integrates:
 
-- EURUSD tick or bar data
-- Equity indices
-- Interest rate data
-- Volatility indices
-- Transformer-based forecasting models
-- Walk-forward backtesting
-- Volatility-targeted portfolio construction
-
-The objective is to predict risk-adjusted future EURUSD returns and generate systematic trading signals.
+- FX data (EURUSD)
+- Global equities (SPX, EuroStoxx)
+- Volatility (VIX)
+- Dollar index (DXY)
+- Interest rates (US 2Y, German 2Y proxy)
+- Macro regime features
+- Deep learning sequence model (Transformer-based)
 
 ---
 
-# Installation
+# ⚠️ Important Note
 
-pip install pandas numpy yfinance requests pyarrow
+This is a **research / experimental system**, not production trading advice.
 
----
+It is optimized for:
 
-# Motivation
-
-Traditional FX models often rely exclusively on lagged price action and technical indicators.
-
-However, FX markets are heavily influenced by:
-
-- Relative economic growth
-- Monetary policy divergence
-- Risk-on / risk-off sentiment
-- Equity market performance
-- Yield spreads
-
-This project attempts to incorporate these macroeconomic drivers into a unified machine learning framework.
+- learning time-series ML
+- macro feature engineering
+- large-scale dataset handling
+- backtesting signal logic
 
 ---
 
-# Research Foundation
-
-The forecasting architecture is inspired by:
-
-**Temporal Fusion Transformers for Interpretable Multi-horizon Time Series Forecasting**
-
-Bryan Lim et al.
-
-https://arxiv.org/abs/1912.09363
-
-Key ideas adopted from the paper:
-
-- Multi-source time series inputs
-- Sequence modeling
-- Attention mechanisms
-- Dynamic feature importance
-- Multi-horizon forecasting
-
-The implementation in this repository is a simplified TFT-inspired architecture built using PyTorch's TransformerEncoder.
-
----
-
-# Data Sources
-
-## FX Data
-
-EURUSD bid/ask data
-
-Required fields:
-
-| Column | Description |
-|----------|-------------|
-| timestamp | UTC timestamp |
-| bid | bid price |
-| ask | ask price |
-
----
-
-## Market Data
-
-Downloaded automatically from Yahoo Finance.
-
-| Asset | Symbol |
-|---------|---------|
-| S&P 500 | ^GSPC |
-| Euro Stoxx 50 | ^STOXX50E |
-| VIX | ^VIX |
-| US Dollar Index | DX-Y.NYB |
-
----
-
-## Macroeconomic Data
-
-Downloaded from FRED.
-
-| Series | FRED Code |
-|----------|----------|
-| US 2Y Treasury Yield | DGS2 |
-| 10Y-2Y Yield Curve | T10Y2Y |
-
----
-
-# Project Structure
-
-```text
-.
-├── data/
-│   ├── fx/
-│   └── macro/
-│
-├── ingest_macro_data.py
-├── features.py
-├── models.py
-├── train.py
-├── backtest.py
-├── strategy.py
-├── requirements.txt
-└── README.md
-```
-
----
-
-# Installation
-
-Create a virtual environment:
-
-```bash
-python -m venv venv
-source venv/bin/activate
-```
-
-Install dependencies:
-
-```bash
-pip install -r requirements.txt
-```
-
-or
-
-```bash
-pip install pandas numpy torch yfinance fredapi pyarrow scikit-learn
-```
-
----
-
-# FRED API Key
-
-Create a free API key:
-
-https://fred.stlouisfed.org/docs/api/api_key.html
-
-Export the key:
-
-```bash
-export FRED_API_KEY="YOUR_KEY"
-```
-
----
-
-# Data Ingestion
-
-Download macro data:
-
-```bash
-python ingest_macro_data.py
-```
-
-This will download:
-
-- SPX
-- EuroStoxx
-- VIX
-- DXY
-- Treasury data
-
-and save a cached parquet dataset.
-
-Output:
-
-```text
-macro_data/
-└── macro_2024-01-01_2026-06-01.parquet
-```
-
----
-
-# Feature Engineering
-
-The model generates several categories of features.
-
-## FX Features
-
-- Lagged returns
-- Momentum
-- Volatility
-- Spread dynamics
-- Rolling z-scores
-
----
-
-## Equity Features
-
-- SPX returns
-- EuroStoxx returns
-- Relative equity performance
-
-```text
-equity_relative =
-EuroStoxx return
--
-SPX return
-```
-
----
-
-## Macro Features
-
-- Yield spread
-- Yield curve slope
-- DXY momentum
-- VIX changes
-
----
-
-## Regime Features
-
-- Risk regime
-- Volatility regime
-- Session effects
-
----
-
-# Target Construction
+# 🧠 Model Overview
 
 The model predicts:
 
-```text
-15-minute future return
-/
-future volatility
-```
+> Risk-adjusted 15-minute EURUSD returns
 
-This creates a risk-adjusted prediction target rather than predicting raw returns.
+Then converts predictions into trading signals:
 
----
-
-# Model
-
-The default architecture is a Transformer-based sequence model.
-
-Input:
-
-```text
-120 timestep sequence
-```
-
-Features:
-
-```text
-FX
-+
-Equities
-+
-Rates
-+
-Volatility
-```
-
-Output:
-
-```text
-Forecast risk-adjusted return
-```
+- `+1` → Long EURUSD
+- `-1` → Short EURUSD
+- `0` → Flat
 
 ---
 
-# Training
+# 📊 Pipeline
 
-Train the model:
+## 1. Data Ingestion
+
+### Macro data
+- Yahoo Finance (SPX, VIX, STOXX50E, DXY)
+- FRED (US 2Y, yield curve)
+
+### FX data
+- EURUSD parquet files (external source)
+
+---
+
+## 2. Feature Engineering
+
+Creates:
+
+- FX momentum (lags 1–10)
+- Rolling volatility (20, 100)
+- Equity relative strength
+- Yield spreads
+- Dollar regime signals
+- VIX regime indicators
+- Time-of-day cyclical encoding
+
+---
+
+## 3. Model
+
+A lightweight Transformer:
+
+- Input projection layer
+- Transformer encoder
+- Fully connected head
+- Outputs scalar risk-adjusted return
+
+---
+
+## 4. Training
+
+- Huber / SmoothL1 loss
+- Batch training via DataLoader
+- Gradient clipping
+- Streaming dataset (no full RAM load)
+
+---
+
+## 5. Backtesting
+
+Includes:
+
+- Transaction costs
+- Equity curve
+- Sharpe ratio
+- Drawdown
+- Win rate
+
+---
+
+# 🚀 How to Run
+
+## 1. Install dependencies
 
 ```bash
-python train.py
-```
-
-The model uses:
-
-- Huber loss
-- AdamW optimizer
-- Sequence inputs
-- Walk-forward evaluation
-
----
-
-# Signal Generation
-
-Signals are generated from model predictions.
-
-```text
-prediction > threshold
-→ Long EURUSD
-
-prediction < -threshold
-→ Short EURUSD
-
-otherwise
-→ Flat
-```
-
-Example:
-
-```python
-signal = np.where(
-    pred > 1,
-    1,
-    np.where(
-        pred < -1,
-        -1,
-        0
-    )
-)
-```
-
----
-
-# Position Sizing
-
-The strategy uses volatility targeting.
-
-```text
-Position Size =
-Target Volatility
-/
-Realized Volatility
-```
-
-This reduces exposure during unstable market regimes.
-
----
-
-# Backtesting
-
-The framework supports walk-forward testing.
-
-Example:
-
-```text
-Train:
-Jan 2024 → Dec 2025
-
-Test:
-Jan 2026
-
-Retrain
-
-Train:
-Jan 2024 → Jan 2026
-
-Test:
-Feb 2026
-```
-
-This avoids look-ahead bias and provides realistic out-of-sample evaluation.
-
----
-
-# Performance Metrics
-
-The following metrics should be evaluated:
-
-- Sharpe Ratio
-- Sortino Ratio
-- Maximum Drawdown
-- Hit Rate
-- Profit Factor
-- Annualized Return
-- Turnover
-
----
-
-# Future Improvements
-
-Potential extensions:
-
-- Full Temporal Fusion Transformer implementation
-- Graph Neural Networks
-- Multi-currency portfolio
-- Reinforcement Learning execution layer
-- Triple-barrier labeling
-- LightGBM ensemble
-- Transaction cost modeling
-- Dynamic position sizing
-
----
-
-# Disclaimer
-
-This repository is intended for research and educational purposes only.
-
-Past performance does not guarantee future results. Trading foreign exchange and leveraged products involves substantial risk and may result in losses exceeding initial capital.
+pip install pandas numpy torch yfinance requests pyarrow

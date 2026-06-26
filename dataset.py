@@ -140,27 +140,38 @@ def get_feature_columns(df: pd.DataFrame):
 # =====================================================
 # MAIN DATA BUILDER
 # =====================================================
+def build_dataset(fx, macro):
+    import pandas as pd
+    import numpy as np
 
-def build_dataset(fx_path: str, macro_path: str):
-    """
-    Full pipeline:
-    FX + macro merge -> clean -> feature select -> dataset
-    """
+    df = fx.merge(macro, on="timestamp", how="left")
 
-    df = merge_fx_macro(fx_path, macro_path)
+    df = df.sort_values("timestamp")
 
-    df = build_training_frame(df)
+    # -----------------------------
+    # FX mid + returns
+    # -----------------------------
+    df["mid"] = (df["bid"] + df["ask"]) / 2
+    df["return"] = df["mid"].pct_change()
 
-    feature_cols = get_feature_columns(df)
+    # -----------------------------
+    # TARGET (15-min ahead return)
+    # -----------------------------
+    horizon = 15
 
-    if "target" not in df.columns:
-        raise ValueError("Missing target column (run feature engineering first)")
-
-    dataset = StreamingDataset(
-        df,
-        feature_cols=feature_cols,
-        target_col="target",
-        seq_len=120
+    df["target"] = (
+            df["mid"].shift(-horizon) / df["mid"] - 1
     )
 
-    return dataset, feature_cols
+    # -----------------------------
+    # CLEAN
+    # -----------------------------
+    df = df.replace([np.inf, -np.inf], np.nan)
+    df = df.dropna()
+
+    feature_cols = [
+        c for c in df.columns
+        if c not in ["timestamp", "target"]
+    ]
+
+    return df[feature_cols], df["target"]

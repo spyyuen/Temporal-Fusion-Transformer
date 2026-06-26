@@ -38,57 +38,30 @@ This usually means:
 # MAIN TRAINING PIPELINE
 # =====================================================
 
-def run_training(
-        fx_path: str,
-        macro_path: str,
-        seq_len: int = 120,
-        batch_size: int = 256,
-        epochs: int = 5,
-        device: str = None
-):
+def run_training(fx_path, macro_path, seq_len=120, epochs=10):
 
-    print("[RUN] Loading dataset...")
+    import pandas as pd
+    from dataset import build_dataset
 
-    dataset, feature_cols = build_dataset(
-        fx_path=fx_path,
-        macro_path=macro_path
-    )
+    fx = pd.read_parquet(fx_path)
+    macro = pd.read_parquet(macro_path)
 
-    print(f"[RUN] Features: {len(feature_cols)}")
+    print("[RUN] Building dataset...")
 
-    # =================================================
-    # TRAIN MODEL
-    # =================================================
+    X, y = build_dataset(fx, macro)
 
-    print("[RUN] Training model...")
+    print(f"[RUN] Dataset size: {len(X):,} rows")
 
-    model = train_model(
-        dataset=dataset,
-        input_dim=len(feature_cols),
-        batch_size=batch_size,
-        epochs=epochs,
-        device=device
-    )
+    # optional safety cap (VERY IMPORTANT for your RAM issue)
+    max_rows = 1_000_000
+    if len(X) > max_rows:
+        print(f"[WARN] Downsampling to {max_rows}")
+        X = X.tail(max_rows)
+        y = y.tail(max_rows)
 
-    # =================================================
-    # SIGNAL GENERATION
-    # =================================================
+    model = train_model(X, y, seq_len=seq_len, epochs=epochs)
 
-    print("[RUN] Generating signals...")
-
-    signals = generate_signals(
-        model,
-        dataset
-    )
-
-    result = pd.DataFrame({
-        "signal": signals
-    })
-
-    print("[RUN] Done")
-
-    return model, result
-
+    return model
 
 # =====================================================
 # OPTIONAL ENTRYPOINT
