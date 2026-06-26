@@ -1,74 +1,51 @@
 """
 ingest_macro_data.py
 
-Data ingestion pipeline for the Temporal Fusion Transformer project.
+Downloads and caches:
 
-Responsibilities
-----------------
-1. Download macro data
-    - Yahoo Finance
-    - FRED JSON API
+    • SPX
+    • EuroStoxx
+    • VIX
+    • DXY
+    • US 2Y Treasury
+    • Yield Curve
 
-2. Build macro feature dataset
+Also builds a single FX cache by combining all
+EURUSD parquet files from either
 
-3. Build consolidated FX cache
+    ./data
 
-4. Cache management
+or
 
-Everything is timezone-normalized to UTC.
+    ../Neural-Spot-FX-Alpha-Model/data
+
+Outputs
+
+    macro_data/macro_*.parquet
+    data/fx.parquet
 """
 
-from __future__ import annotations
-
+from pathlib import Path
 import os
 import time
-from pathlib import Path
-from typing import Callable
 
 import numpy as np
 import pandas as pd
 import requests
 import yfinance as yf
 
-
-# ============================================================
-# PROJECT PATHS
-# ============================================================
-
-PROJECT_ROOT = Path(__file__).resolve().parent
-
-DATA_DIR = PROJECT_ROOT / "macro_data"
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-FX_CACHE_DIR = (
-        PROJECT_ROOT.parent
-        / "Neural-Spot-FX-Alpha-Model"
-        / "data"
-
+from config import (
+    PROJECT_ROOT,
+    DATA_DIR,
+    MACRO_DIR,
+    FX_SOURCE_DIRS,
+    START_DATE,
+    END_DATE,
 )
 
-MACRO_DIR = PROJECT_ROOT / "macro_data"
-MACRO_DIR.mkdir(parents=True, exist_ok=True)
-
-LOCAL_FX_DIR = PROJECT_ROOT / "data"
-LOCAL_FX_DIR.mkdir(parents=True, exist_ok=True)
-
-# Existing FX project
-EXTERNAL_FX_DIR = (
-        PROJECT_ROOT.parent
-        / "Neural-Spot-FX-Alpha-Model"
-        / "data"
-)
-
-SEARCH_DIRS = [
-    LOCAL_FX_DIR,
-    EXTERNAL_FX_DIR,
-]
-
-
-# ============================================================
-# MARKET DATA CONFIG
-# ============================================================
+# ---------------------------------------------------------
+# Yahoo tickers
+# ---------------------------------------------------------
 
 YF_TICKERS = {
     "spx": "^GSPC",
@@ -77,108 +54,59 @@ YF_TICKERS = {
     "dxy": "DX-Y.NYB",
 }
 
-#
-# Germany 2Y is intentionally omitted because it is not
-# consistently available through FRED.
-#
+# ---------------------------------------------------------
+# FRED series
+# ---------------------------------------------------------
+
 FRED_SERIES = {
-    "us2y": "DGS2",
+    "ust2y": "DGS2",
     "yield_curve": "T10Y2Y",
 }
 
+# ---------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------
 
-# ============================================================
-# HELPERS
-# ============================================================
+def ensure_directories():
 
-def retry(
-        attempts: int = 5,
-        delay: int = 5,
-):
-    """
-    Retry decorator for transient HTTP failures.
-    """
-
-    def decorator(func):
-
-        def wrapper(*args, **kwargs):
-
-            last_exception = None
-
-            for i in range(attempts):
-
-                try:
-                    return func(*args, **kwargs)
-
-                except Exception as e:
-
-                    last_exception = e
-
-                    print(
-                        f"[Retry {i+1}/{attempts}] {e}"
-                    )
-
-                    if i < attempts - 1:
-                        time.sleep(delay)
-
-            raise last_exception
-
-        return wrapper
-
-    return decorator
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    MACRO_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# ============================================================
-# TIMESTAMP NORMALIZATION
-# ============================================================
+def latest_macro_cache():
 
-def normalize_timestamp(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Ensures timestamps are:
-
-    * datetime64[ns, UTC]
-    * sorted
-    * unique
-    * non-null
-    """
-
-    if "timestamp" not in df.columns:
-        raise ValueError(
-            "DataFrame has no timestamp column."
-        )
-
-    df = df.copy()
-
-    df["timestamp"] = pd.to_datetime(
-        df["timestamp"],
-        errors="coerce",
-        format="mixed",
-        utc=True,
+    files = sorted(
+        MACRO_DIR.glob("macro_*.parquet")
     )
 
-    df = df.dropna(
-        subset=["timestamp"]
+    if not files:
+        return None
+
+    return max(
+        files,
+        key=lambda p: p.stat().st_mtime
     )
 
-    df = (
-        df.sort_values("timestamp")
-        .drop_duplicates("timestamp")
-        .reset_index(drop=True)
-    )
 
-    return df
+def latest_fx_cache():
+
+    file = DATA_DIR / "fx.parquet"
+
+    if file.exists():
+        return file
+
+    return None
 
 
-# ============================================================
-# YAHOO DOWNLOAD
-# ============================================================
+# ---------------------------------------------------------
+# Yahoo download
+# ---------------------------------------------------------
 
-@retry()
 def download_yahoo(
         ticker: str,
         start: str,
         end: str,
-) -> pd.DataFrame:
+):
 
     print(f"[Yahoo] {ticker}")
 
@@ -188,24 +116,15 @@ def download_yahoo(
         end=end,
         auto_adjust=True,
         progress=False,
-        threads=False,
     )
 
     if df.empty:
         raise RuntimeError(
-            f"No data for {ticker}"
+            f"No data returned for {ticker}"
         )
 
-    #
-    # Flatten MultiIndex if Yahoo decides to use one.
-    #
-    if isinstance(
-            df.columns,
-            pd.MultiIndex,
-    ):
-        df.columns = (
-            df.columns.get_level_values(0)
-        )
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
 
     df = df.reset_index()
 
@@ -222,149 +141,151 @@ def download_yahoo(
         }
     )
 
-    df = df[
+    df["timestamp"] = pd.to_datetime(
+        df["timestamp"],
+        utc=True,
+    )
+
+    return df[
         [
             "timestamp",
             "close",
         ]
     ]
 
-    return normalize_timestamp(df)
 
+# ---------------------------------------------------------
+# FRED JSON download
+# ---------------------------------------------------------
 
-# ============================================================
-# FRED DOWNLOAD
-# ============================================================
-
-@retry()
 def download_fred(
         series_id: str,
         start: str,
         end: str,
-) -> pd.DataFrame:
+):
 
-    api_key = os.environ.get(
+    print(f"[FRED] {series_id}")
+
+    api_key = os.getenv(
         "FRED_API_KEY"
     )
 
     if api_key is None:
         raise RuntimeError(
-            "FRED_API_KEY not defined."
+            "FRED_API_KEY not set."
         )
-
-    print(
-        f"[FRED] {series_id}"
-    )
 
     url = (
         "https://api.stlouisfed.org/"
         "fred/series/observations"
     )
 
-    response = requests.get(
-        url,
-        params={
-            "series_id": series_id,
-            "api_key": api_key,
-            "file_type": "json",
-            "observation_start": start,
-            "observation_end": end,
-        },
-        timeout=120,
-    )
+    params = {
+        "series_id": series_id,
+        "api_key": api_key,
+        "file_type": "json",
+        "observation_start": start,
+        "observation_end": end,
+    }
 
-    response.raise_for_status()
+    last_error = None
 
-    data = response.json()
+    for attempt in range(5):
 
-    observations = data.get(
-        "observations",
-        []
-    )
+        try:
 
-    if len(observations) == 0:
-        raise RuntimeError(
-            f"No observations for {series_id}"
-        )
+            r = requests.get(
+                url,
+                params=params,
+                timeout=120,
+            )
 
-    df = pd.DataFrame(
-        observations
-    )[["date", "value"]]
+            r.raise_for_status()
 
-    df.columns = [
-        "timestamp",
-        "value",
-    ]
+            js = r.json()
 
-    df["value"] = pd.to_numeric(
-        df["value"],
-        errors="coerce",
-    )
+            obs = js["observations"]
 
-    df = normalize_timestamp(df)
+            df = pd.DataFrame(obs)
 
-    return df
+            if df.empty:
+                raise RuntimeError(
+                    f"No observations for {series_id}"
+                )
 
+            df = df[
+                [
+                    "date",
+                    "value",
+                ]
+            ]
 
-# ============================================================
-# CACHE HELPERS
-# ============================================================
+            df.columns = [
+                "timestamp",
+                "value",
+            ]
 
-def latest_macro_file():
+            df["timestamp"] = pd.to_datetime(
+                df["timestamp"],
+                utc=True,
+            )
 
-    files = sorted(
-        MACRO_DIR.glob(
-            "macro_*.parquet"
-        )
-    )
+            df["value"] = pd.to_numeric(
+                df["value"],
+                errors="coerce",
+            )
 
-    if not files:
-        return None
+            return df
 
-    return max(
-        files,
-        key=lambda f: f.stat().st_mtime,
-    )
+        except Exception as e:
 
+            last_error = e
 
-def latest_fx_cache():
+            print(
+                f"Retry {attempt+1}/5 ({series_id})"
+            )
 
-    file = LOCAL_FX_DIR / "fx.parquet"
+            time.sleep(5)
 
-    if file.exists():
-        return file
+    raise RuntimeError(last_error)
 
-    return None
-
-# =====================================================
-# BUILD MACRO DATASET
-# =====================================================
+# ---------------------------------------------------------
+# Build macro dataset
+# ---------------------------------------------------------
 
 def build_macro_dataset(
-        start: str,
-        end: str,
-) -> Path:
+        start: str = START_DATE,
+        end: str = END_DATE,
+        force: bool = False,
+):
+    """
+    Downloads all macro series, engineers features,
+    caches the result and returns the parquet path.
+    """
 
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_directories()
 
-    outfile = DATA_DIR / f"macro_{start}_{end}.parquet"
+    outfile = (
+            MACRO_DIR
+            / f"macro_{start}_{end}.parquet"
+    )
 
-    if outfile.exists():
+    if outfile.exists() and not force:
         print(f"[CACHE HIT] {outfile}")
         return outfile
 
-    all_dfs = []
+    frames = []
 
-    # ---------------------------------------------
-    # Yahoo Finance
-    # ---------------------------------------------
+    # -------------------------------------------------
+    # Yahoo assets
+    # -------------------------------------------------
 
     for name, ticker in YF_TICKERS.items():
 
         df = download_yahoo(
-            ticker=ticker,
-            start=start,
-            end=end,
+            ticker,
+            start,
+            end,
         )
 
         df = df.rename(
@@ -373,19 +294,13 @@ def build_macro_dataset(
             }
         )
 
-        df["timestamp"] = pd.to_datetime(
-            df["timestamp"],
-            utc=True,
-            format="mixed",
-        )
-
-        all_dfs.append(
+        frames.append(
             df.set_index("timestamp")
         )
 
-    # ---------------------------------------------
-    # FRED
-    # ---------------------------------------------
+    # -------------------------------------------------
+    # FRED assets
+    # -------------------------------------------------
 
     for name, series in FRED_SERIES.items():
 
@@ -401,13 +316,7 @@ def build_macro_dataset(
             }
         )
 
-        df["timestamp"] = pd.to_datetime(
-            df["timestamp"],
-            utc=True,
-            format="mixed",
-        )
-
-        all_dfs.append(
+        frames.append(
             df.set_index("timestamp")
         )
 
@@ -415,7 +324,7 @@ def build_macro_dataset(
 
     merged = (
         pd.concat(
-            all_dfs,
+            frames,
             axis=1,
             sort=True,
         )
@@ -424,40 +333,51 @@ def build_macro_dataset(
         .reset_index()
     )
 
-    # ---------------------------------------------
-    # Feature Engineering
-    # ---------------------------------------------
+    # -------------------------------------------------
+    # Feature engineering
+    # -------------------------------------------------
 
     print("Creating macro features...")
 
-    merged["spx_ret"] = merged["spx"].pct_change()
+    merged["spx_ret"] = (
+        merged["spx"]
+        .pct_change()
+    )
 
-    merged["eustoxx_ret"] = merged["eustoxx"].pct_change()
+    merged["eustoxx_ret"] = (
+        merged["eustoxx"]
+        .pct_change()
+    )
 
     merged["equity_relative"] = (
             merged["eustoxx_ret"]
             - merged["spx_ret"]
     )
 
-    merged["vix_change"] = merged["vix"].pct_change()
+    merged["vix_change"] = (
+        merged["vix"]
+        .pct_change()
+    )
 
-    merged["dxy_ret"] = merged["dxy"].pct_change()
-
-    # We only have US rates right now
-    merged["ust2y"] = merged["us2y"]
-
-    merged["yield_spread"] = merged["yield_curve"]
+    merged["dxy_ret"] = (
+        merged["dxy"]
+        .pct_change()
+    )
 
     merged["risk_regime"] = (
             merged["vix"]
             >
-            merged["vix"].rolling(50).mean()
+            merged["vix"]
+            .rolling(50)
+            .mean()
     ).astype(int)
 
     merged["spx_vix_corr"] = (
         merged["spx_ret"]
         .rolling(20)
-        .corr(merged["vix_change"])
+        .corr(
+            merged["vix_change"]
+        )
     )
 
     merged["spx_momentum_20"] = (
@@ -481,15 +401,33 @@ def build_macro_dataset(
     merged["vix_zscore"] = (
             (
                     merged["vix"]
-                    - merged["vix"].rolling(100).mean()
+                    -
+                    merged["vix"]
+                    .rolling(100)
+                    .mean()
             )
             /
-            merged["vix"].rolling(100).std()
+            merged["vix"]
+            .rolling(100)
+            .std()
     )
+
+    # Use yield curve if German 2Y isn't available
+
+    merged["yield_spread"] = (
+        merged["yield_curve"]
+    )
+
+    # -------------------------------------------------
+    # Cleanup
+    # -------------------------------------------------
 
     merged = (
         merged
-        .replace([np.inf, -np.inf], np.nan)
+        .replace(
+            [np.inf, -np.inf],
+            np.nan,
+        )
         .ffill()
         .dropna()
     )
@@ -499,49 +437,37 @@ def build_macro_dataset(
         index=False,
     )
 
+    print()
     print(f"[MACRO CREATED] {outfile}")
     print(f"Rows: {len(merged):,}")
 
     return outfile
 
-# =====================================================
-# BUILD FX DATASET
-# =====================================================
+# ---------------------------------------------------------
+# Build FX dataset
+# ---------------------------------------------------------
 
-def build_fx_dataset(
-        force: bool = False,
-) -> Path:
+def build_fx_dataset(force: bool = False):
+    """
+    Combines all EURUSD parquet files into a single cached
+    data/fx.parquet file.
 
-    local_data_dir = PROJECT_ROOT / "data"
-    local_data_dir.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    Searches every directory listed in FX_SOURCE_DIRS.
+    """
 
-    output_file = local_data_dir / "fx.parquet"
+    ensure_directories()
 
-    # -----------------------------------------
-    # Cache hit
-    # -----------------------------------------
+    output_file = DATA_DIR / "fx.parquet"
 
     if output_file.exists() and not force:
-
         print(f"[CACHE HIT] {output_file}")
-
         return output_file
 
-    # -----------------------------------------
-    # Search locations
-    # -----------------------------------------
+    files = []
 
-    search_dirs = [
-        local_data_dir,
-        FX_CACHE_DIR,
-    ]
+    for directory in FX_SOURCE_DIRS:
 
-    eurusd_files = []
-
-    for directory in search_dirs:
+        directory = Path(directory)
 
         if not directory.exists():
             continue
@@ -556,9 +482,14 @@ def build_fx_dataset(
                 f"Found {len(matches)} files in {directory}"
             )
 
-            eurusd_files.extend(matches)
+            files.extend(matches)
 
-    if not eurusd_files:
+    if not files:
+
+        searched = "\n".join(
+            f"  • {d}"
+            for d in FX_SOURCE_DIRS
+        )
 
         raise RuntimeError(
             f"""
@@ -566,61 +497,46 @@ No EURUSD parquet files found.
 
 Searched:
 
-{local_data_dir}
+{searched}
 
-{FX_CACHE_DIR}
-
-Run your Neural-Spot-FX-Alpha-Model downloader first.
+Copy your weekly EURUSD parquet files into one of the
+directories above.
 """
         )
 
-    # -----------------------------------------
-    # Load
-    # -----------------------------------------
-
     dfs = []
 
-    for file in eurusd_files:
+    for file in files:
 
         print(f"Loading {file.name}")
 
-        df = pd.read_parquet(file)
+        df = pd.read_parquet(file).reset_index() #in case timestamp is an index
+
+        # Handle mixed ISO8601 timestamp formats safely
+        df["timestamp"] = pd.to_datetime(
+            df["timestamp"],
+            format="mixed",
+            utc=True,
+            errors="coerce",
+        )
+
+        df = df.dropna(
+            subset=["timestamp"]
+        )
 
         dfs.append(df)
 
-    fx = pd.concat(
-        dfs,
-        ignore_index=True,
-    )
-
-    # -----------------------------------------
-    # Timestamp cleanup
-    # -----------------------------------------
-
-    fx["timestamp"] = pd.to_datetime(
-        fx["timestamp"],
-        utc=True,
-        format="mixed",
-        errors="coerce",
-    )
-
-    fx = fx.dropna(
-        subset=["timestamp"]
-    )
-
     fx = (
-        fx
+        pd.concat(
+            dfs,
+            ignore_index=True,
+        )
         .sort_values("timestamp")
         .drop_duplicates(
-            subset="timestamp",
-            keep="last",
+            subset="timestamp"
         )
         .reset_index(drop=True)
     )
-
-    # -----------------------------------------
-    # Save cache
-    # -----------------------------------------
 
     fx.to_parquet(
         output_file,
@@ -632,3 +548,20 @@ Run your Neural-Spot-FX-Alpha-Model downloader first.
     print(f"Rows: {len(fx):,}")
 
     return output_file
+
+
+# ---------------------------------------------------------
+# Main
+# ---------------------------------------------------------
+
+if __name__ == "__main__":
+
+    build_macro_dataset(
+        start=START_DATE,
+        end=END_DATE,
+        force=False,
+    )
+
+    build_fx_dataset(
+        force=False,
+    )
