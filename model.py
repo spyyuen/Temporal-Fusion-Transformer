@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-
+from temporal_fusion_transformer import build_sequences
 
 # =====================================================
 # SMALL TFT-STYLE ENCODER (STABLE VERSION)
@@ -66,61 +66,36 @@ class AlphaTransformer(nn.Module):
 # SAFE TRAIN LOOP (BATCHED - NO MEMORY BLOWUPS)
 # =====================================================
 
-def train_model(
-        dataset,
-        input_dim: int,
-        batch_size: int = 256,
-        epochs: int = 5,
-        lr: float = 1e-4,
-        device: str = None
-):
+def train_model(X, y, seq_len=120, epochs=20):
 
-    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-
-    loader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=0,  # IMPORTANT: avoids RAM explosion on Mac
-        pin_memory=False
+    X_seq, y_seq = build_sequences(
+        X,
+        y,
+        seq_len=seq_len
     )
 
-    model = AlphaTransformer(input_dim=input_dim).to(device)
+    X_tensor = torch.tensor(X_seq, dtype=torch.float32)
+    y_tensor = torch.tensor(y_seq.reshape(-1, 1), dtype=torch.float32)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
-    loss_fn = nn.SmoothL1Loss()
+    model = AlphaTransformer(input_dim=X.shape[1])
 
-    model.train()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    loss_fn = nn.HuberLoss()
 
     for epoch in range(epochs):
 
-        total_loss = 0.0
+        optimizer.zero_grad()
 
-        for x, y in loader:
+        preds = model(X_tensor)
 
-            x = x.to(device)
-            y = y.to(device).unsqueeze(-1)
+        loss = loss_fn(preds, y_tensor)
 
-            optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
 
-            preds = model(x)
-
-            loss = loss_fn(preds, y)
-
-            loss.backward()
-
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-
-            optimizer.step()
-
-            total_loss += loss.item()
-
-        avg_loss = total_loss / len(loader)
-
-        print(f"[EPOCH {epoch+1}] loss={avg_loss:.6f}")
+        print(epoch, loss.item())
 
     return model
-
 
 # =====================================================
 # INFERENCE / SIGNAL GENERATION

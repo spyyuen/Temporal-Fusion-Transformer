@@ -255,35 +255,36 @@ class AlphaTransformer(nn.Module):
 # TRAIN
 # =====================================================
 
-def train_model(X, y, epochs=10):
+def train_model(X, y, seq_len=120, epochs=20):
 
-    X_seq, y_seq = build_sequences(X, y)
+    X_seq, y_seq = build_sequences(
+        X,
+        y,
+        seq_len=seq_len
+    )
 
-    X_tensor = torch.tensor(X_seq)
-    y_tensor = torch.tensor(y_seq).unsqueeze(-1)
+    X_tensor = torch.tensor(X_seq, dtype=torch.float32)
+    y_tensor = torch.tensor(y_seq.reshape(-1, 1), dtype=torch.float32)
 
-    model = AlphaTransformer(X.shape[1])
+    model = AlphaTransformer(input_dim=X.shape[1])
 
-    opt = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
     loss_fn = nn.HuberLoss()
-
-    model.train()
 
     for epoch in range(epochs):
 
-        opt.zero_grad()
+        optimizer.zero_grad()
 
-        pred = model(X_tensor)
+        preds = model(X_tensor)
 
-        loss = loss_fn(pred, y_tensor)
+        loss = loss_fn(preds, y_tensor)
 
         loss.backward()
-        opt.step()
+        optimizer.step()
 
-        print(f"epoch={epoch} loss={loss.item():.6f}")
+        print(epoch, loss.item())
 
     return model
-
 
 # =====================================================
 # SIGNALS
@@ -334,6 +335,15 @@ def run(fx_path, macro_path, seq_len=120, epochs=20):
         y = y.iloc[-MAX_ROWS:]
 
     print("[RUN] Training model...")
+
+    print("[DEBUG] X shape:", X.shape)
+    print("[DEBUG] y shape:", y.shape)
+
+    if len(X) == 0:
+        raise ValueError(
+            "Empty dataset after feature engineering. "
+            "Check merge_asof alignment + timestamp format."
+        )
 
     model = train_model(X, y, seq_len=seq_len, epochs=epochs)
 

@@ -51,16 +51,33 @@ def merge_fx_macro(fx_path: str, macro_path: str):
     macro = macro.replace([np.inf, -np.inf], np.nan).ffill()
     fx = fx.replace([np.inf, -np.inf], np.nan).ffill()
 
+    fx = fx.copy()
+    macro = macro.copy()
+
+    fx["timestamp"] = pd.to_datetime(fx["timestamp"], utc=True)
+    macro["timestamp"] = pd.to_datetime(macro["timestamp"], utc=True)
+
+    fx = fx.sort_values("timestamp")
+    macro = macro.sort_values("timestamp")
+
     # SAFE MERGE
     df = pd.merge_asof(
-        fx,
-        macro,
+        fx.sort_values("timestamp"),
+        macro.sort_values("timestamp"),
         on="timestamp",
         direction="backward",
-        tolerance=pd.Timedelta("2D")  # prevents huge backfill explosions.  If the nearest previous row is more than 2 days earlier, the result will contain NaN for the columns from right.
+        tolerance=pd.Timedelta("1D")
     )
+    # prevents huge backfill explosions.  If the nearest previous row is more than 2 days earlier, the result will contain NaN for the columns from right.
 
     df = df.dropna()
+    print("[DEBUG FX RANGE]", fx["timestamp"].min(), fx["timestamp"].max())
+
+    print("[DEBUG MACRO RANGE]", macro["timestamp"].min(), macro["timestamp"].max())
+
+    print("[DEBUG FX ROWS]", len(fx))
+
+    print("[DEBUG MACRO ROWS]", len(macro))
 
     return df
 
@@ -140,13 +157,54 @@ def get_feature_columns(df: pd.DataFrame):
 # =====================================================
 # MAIN DATA BUILDER
 # =====================================================
-def build_dataset(fx, macro):
+def build_dataset(fx, macro, max_rows: int = 1_000_000):
     import pandas as pd
     import numpy as np
 
-    df = fx.merge(macro, on="timestamp", how="left")
+    fx["timestamp"] = pd.to_datetime(
+        fx["timestamp"],
+        utc=True,
+        format="mixed",
+        errors="coerce",
+    )
 
-    df = df.sort_values("timestamp")
+    macro["timestamp"] = pd.to_datetime(
+        macro["timestamp"],
+        utc=True,
+        format="mixed",
+        errors="coerce",
+    )
+
+    fx = fx.dropna(subset=["timestamp"])
+    macro = macro.dropna(subset=["timestamp"])
+
+    fx = fx.sort_values("timestamp")
+    macro = macro.sort_values("timestamp")
+
+    # -------------------------------------------------
+    # IMPORTANT: downsample to avoid OOM (SIGKILL fix)
+    # -------------------------------------------------
+
+    if len(fx) > max_rows:
+        fx = fx.iloc[:: max(1, len(fx) // max_rows)]
+
+    if len(macro) > max_rows:
+        macro = macro.iloc[:: max(1, len(macro) // max_rows)]
+
+    # -------------------------------------------------
+    # merge_asof (fixed + safe)
+    # -------------------------------------------------
+
+    df = pd.merge_asof(
+        fx,
+        macro,
+        on="timestamp",
+        direction="backward",
+        allow_exact_matches=True,
+    )
+
+    df = df.dropna(subset=["timestamp"])
+
 
     # -----------------------------
     # FX mid + returns
