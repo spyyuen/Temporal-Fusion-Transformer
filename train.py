@@ -71,7 +71,7 @@ if __name__ == "__main__":
 
     model, result = run_training(
         fx_path="data/fx.parquet",
-        macro_path="macro_data/macro_2024-01-01_2026-06-01.parquet",
+        macro_path="macro_data/macro_2026-01-01_2026-06-01.parquet",
         epochs=5
     )
 

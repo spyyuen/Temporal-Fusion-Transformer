@@ -8,7 +8,7 @@ from temporal_fusion_transformer import run as train_tft
 # -----------------------------
 # DEFAULT CONFIG
 # -----------------------------
-DEFAULT_START = "2024-01-01"
+DEFAULT_START = "2026-01-01"
 DEFAULT_END = "2026-06-01"
 
 

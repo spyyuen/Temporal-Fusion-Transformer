@@ -12,7 +12,7 @@ import torch
 # (used by ingest_macro_data.py)
 # =====================================================
 
-START_DATE = "2024-01-01"
+START_DATE = "2026-01-01"
 
 END_DATE = "2026-06-01"
 

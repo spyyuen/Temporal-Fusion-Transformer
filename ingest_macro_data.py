@@ -446,22 +446,64 @@ def build_macro_dataset(
 # ---------------------------------------------------------
 # Build FX dataset
 # ---------------------------------------------------------
+def download_eurusd(start: str, end: str) -> pd.DataFrame:
+    print("[FX] Backfilling EURUSD from Yahoo")
 
-def build_fx_dataset(force: bool = False):
+    df = yf.download(
+        "EURUSD=X",
+        start=start,
+        end=end,
+        auto_adjust=True,
+        progress=False,
+    )
+
+    if df.empty:
+        raise RuntimeError("Failed to download EURUSD data")
+
+    df = df.reset_index()
+
+    ts_col = "Datetime" if "Datetime" in df.columns else "Date"
+
+    df = df.rename(
+        columns={
+            ts_col: "timestamp",
+            "Close": "close",
+        }
+    )
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+
+    return df[["timestamp", "close"]]
+
+def build_fx_dataset(
+        start: str = START_DATE,
+        end: str = END_DATE,
+        force: bool = False
+):
     """
-    Combines all EURUSD parquet files into a single cached
-    data/fx.parquet file.
-
-    Searches every directory listed in FX_SOURCE_DIRS.
+    Time-windowed FX dataset builder.
+    Cache key is fully deterministic on (start, end).
     """
 
     ensure_directories()
 
-    output_file = DATA_DIR / "fx.parquet"
+    versioned_file = DATA_DIR / f"fx_{start}_{end}.parquet"
+    latest_file = DATA_DIR / "fx.parquet"
+    # -------------------------------------------------
+    # cache hit
+    # -------------------------------------------------
+    if versioned_file.exists() and not force:
+        print(f"[CACHE HIT] {versioned_file}")
 
-    if output_file.exists() and not force:
-        print(f"[CACHE HIT] {output_file}")
-        return output_file
+        # Keep latest alias in sync
+        if not latest_file.exists():
+            pd.read_parquet(versioned_file).to_parquet(latest_file, index=False)
+
+        return latest_file
+
+    # -------------------------------------------------
+    # gather raw files
+    # -------------------------------------------------
 
     files = []
 
@@ -472,76 +514,101 @@ def build_fx_dataset(force: bool = False):
         if not directory.exists():
             continue
 
-        matches = sorted(
-            directory.glob("EURUSD_*.parquet")
-        )
+        matches = sorted([
+            f for f in directory.glob("*.parquet")
+            if "EURUSD" in f.name.upper()
+        ])
 
         if matches:
-
-            print(
-                f"Found {len(matches)} files in {directory}"
-            )
-
+            print(f"Found {len(matches)} files in {directory}")
             files.extend(matches)
 
     if not files:
+        print("[FX] No cached parquet found → backfilling from source")
 
-        searched = "\n".join(
-            f"  • {d}"
-            for d in FX_SOURCE_DIRS
+        fx = download_eurusd(start, end)
+
+        raw_file = DATA_DIR / "EURUSD_1.parquet"
+        raw_file.parent.mkdir(parents=True, exist_ok=True)
+
+        if isinstance(fx.columns, pd.MultiIndex):
+            fx.columns = fx.columns.get_level_values(0)
+
+        fx = fx.reset_index()
+
+        ts_col = "Datetime" if "Datetime" in fx.columns else "Date"
+
+        fx = fx.rename(
+            columns={
+                ts_col: "timestamp",
+                "Close": "close",
+            }
         )
 
-        raise RuntimeError(
-            f"""
-No EURUSD parquet files found.
+        fx = fx[["timestamp", "close"]]
+        fx.to_parquet(raw_file, index=False)
 
-Searched:
+        files = [raw_file]
 
-{searched}
-
-Copy your weekly EURUSD parquet files into one of the
-directories above.
-"""
-        )
+    # -------------------------------------------------
+    # load + combine
+    # -------------------------------------------------
 
     dfs = []
 
     for file in files:
-
         print(f"Loading {file.name}")
 
-        df = pd.read_parquet(file).reset_index() #in case timestamp is an index
+        df = pd.read_parquet(file).reset_index()
 
-        # Handle mixed ISO8601 timestamp formats safely
+        print('df ', df)
         df["timestamp"] = pd.to_datetime(
             df["timestamp"],
-            format="mixed",
             utc=True,
             errors="coerce",
         )
 
-        df = df.dropna(
-            subset=["timestamp"]
-        )
+        df = df.dropna(subset=["timestamp"])
 
         dfs.append(df)
 
     fx = (
-        pd.concat(
-            dfs,
-            ignore_index=True,
-        )
+        pd.concat(dfs, ignore_index=True)
         .sort_values("timestamp")
-        .drop_duplicates(
-            subset="timestamp"
-        )
-        .reset_index(drop=True)
+        .drop_duplicates(subset="timestamp")
     )
 
-    fx.to_parquet(
-        output_file,
-        index=False,
-    )
+    fx["timestamp"] = pd.to_datetime(fx["timestamp"], utc=True, errors="coerce")
+
+    # -------------------------------------------------
+    # STRICT TIME FILTER (this is now authoritative)
+    # -------------------------------------------------
+
+    start_ts = pd.to_datetime(start, utc=True)
+    end_ts = pd.to_datetime(end, utc=True)
+
+    fx = fx.loc[
+        (fx["timestamp"] >= start_ts) &
+        (fx["timestamp"] <= end_ts)
+        ].reset_index(drop=True)
+
+    # -------------------------------------------------
+    # cache write
+    # -------------------------------------------------
+    versioned_file = DATA_DIR / f"fx_{start}_{end}.parquet"
+    latest_file = DATA_DIR / "fx.parquet"
+
+    fx.to_parquet(versioned_file, index=False)
+    fx.to_parquet(latest_file, index=False)
+
+    print()
+    print(f"[FX CACHE CREATED] {versioned_file}")
+    print(f"[FX LATEST] {latest_file}")
+    print(f"Rows: {len(fx):,}")
+
+    return latest_file
+
+    fx.to_parquet(output_file, index=False)
 
     print()
     print(f"[FX CACHE CREATED] {output_file}")
@@ -549,19 +616,22 @@ directories above.
 
     return output_file
 
-
 # ---------------------------------------------------------
 # Main
 # ---------------------------------------------------------
-
 if __name__ == "__main__":
 
-    build_macro_dataset(
-        start=START_DATE,
-        end=END_DATE,
+    start = START_DATE
+    end = END_DATE
+
+    macro_path = build_macro_dataset(
+        start=start,
+        end=end,
         force=False,
     )
 
-    build_fx_dataset(
+    fx_path = build_fx_dataset(
+        start=start,
+        end=end,
         force=False,
     )
