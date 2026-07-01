@@ -421,9 +421,6 @@ def build_macro_dataset(
     # -------------------------------------------------
     # Cleanup
     # -------------------------------------------------
-
-    pd.set_option('display.max_columns', None)
-
     #Fix for rolling stats that are nan
     merged = merged.dropna(subset=["spx", "vix", "dxy"])
     merged = merged.ffill()
