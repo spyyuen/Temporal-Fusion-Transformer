@@ -39,8 +39,6 @@ from config import (
     DATA_DIR,
     MACRO_DIR,
     FX_SOURCE_DIRS,
-    START_DATE,
-    END_DATE,
 )
 
 # ---------------------------------------------------------
@@ -254,8 +252,8 @@ def download_fred(
 # ---------------------------------------------------------
 
 def build_macro_dataset(
-        start: str = START_DATE,
-        end: str = END_DATE,
+        start: str,
+        end: str ,
         force: bool = False,
 ):
     """
@@ -470,8 +468,8 @@ def download_eurusd(start: str, end: str) -> pd.DataFrame:
     return df[["timestamp", "close"]]
 
 def build_fx_dataset(
-        start: str = START_DATE,
-        end: str = END_DATE,
+        start: str,
+        end: str,
         force: bool = False
 ):
     """

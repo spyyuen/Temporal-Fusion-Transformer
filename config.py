@@ -7,14 +7,6 @@ All project-wide constants and paths should live here.
 from pathlib import Path
 import torch
 
-# =====================================================
-# DEFAULT TIME RANGE
-# (used by ingest_macro_data.py)
-# =====================================================
-
-START_DATE = "2026-01-01"
-
-END_DATE = "2026-06-01"
 
 # ============================================================
 # PROJECT PATHS
