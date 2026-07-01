@@ -1,83 +1,138 @@
-import os
-import base64
 import pandas as pd
-import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import plotly.io as pio
 
 
 # =====================================================
-# PLOT EQUITY CURVE
+# MAIN REPORT GENERATOR (HTML DASHBOARD)
 # =====================================================
 
-def plot_equity(df):
-    plt.figure()
-    plt.plot(df["equity_curve"])
-    plt.title("Equity Curve")
-    plt.xlabel("Time")
-    plt.ylabel("Cumulative Return")
+def generate_html_report(bt_df: pd.DataFrame, metrics: dict, output="report.html"):
 
-    path = "equity.png"
-    plt.savefig(path, bbox_inches="tight")
-    plt.close()
+    bt_df = bt_df.copy()
 
-    return path
+    fig = make_subplots(
+        rows=4,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.04,
+        subplot_titles=(
+            "Equity Curve",
+            "Strategy Returns",
+            "Positions",
+            "Drawdown Proxy"
+        )
+    )
 
+    # -------------------------------------------------
+    # Equity curve
+    # -------------------------------------------------
 
-# =====================================================
-# CONVERT IMAGE TO BASE64
-# =====================================================
+    fig.add_trace(
+        go.Scatter(
+            y=bt_df["equity_curve"],
+            name="Equity",
+            line=dict(width=2)
+        ),
+        row=1, col=1
+    )
 
-def img_to_base64(path):
-    with open(path, "rb") as f:
-        return base64.b64encode(f.read()).decode("utf-8")
+    # -------------------------------------------------
+    # Strategy returns
+    # -------------------------------------------------
 
+    fig.add_trace(
+        go.Scatter(
+            y=bt_df["strategy_return"],
+            name="Returns",
+            line=dict(width=1)
+        ),
+        row=2, col=1
+    )
 
-# =====================================================
-# GENERATE HTML REPORT
-# =====================================================
+    # -------------------------------------------------
+    # Positions
+    # -------------------------------------------------
 
-def generate_report(df, metrics, output_file="backtest_report.html"):
+    fig.add_trace(
+        go.Scatter(
+            y=bt_df["position"],
+            name="Position",
+            line=dict(width=1)
+        ),
+        row=3, col=1
+    )
 
-    img_path = plot_equity(df)
-    img_b64 = img_to_base64(img_path)
+    # -------------------------------------------------
+    # Drawdown
+    # -------------------------------------------------
 
-    html = f"""
+    equity = bt_df["equity_curve"].values
+    peak = pd.Series(equity).cummax().values
+    drawdown = equity - peak
+
+    fig.add_trace(
+        go.Scatter(
+            y=drawdown,
+            name="Drawdown",
+            line=dict(width=1, color="red")
+        ),
+        row=4, col=1
+    )
+
+    # -------------------------------------------------
+    # Layout
+    # -------------------------------------------------
+
+    fig.update_layout(
+        title=(
+            f"Backtest Report | "
+            f"Sharpe: {metrics['sharpe']:.2f} | "
+            f"Sortino: {metrics['sortino']:.2f} | "
+            f"Max DD: {metrics['max_drawdown']:.4f}"
+        ),
+        height=1000,
+        template="plotly_dark",
+        showlegend=False
+    )
+
+    fig.write_html(output, include_plotlyjs="cdn")
+
+    print(f"[REPORT SAVED] {output}")
+
+def metrics_html(metrics: dict):
+
+    rows = "".join([
+        f"<tr><td>{k}</td><td>{v:.6f}</td></tr>"
+        for k, v in metrics.items()
+    ])
+
+    return f"""
     <html>
     <head>
-        <title>Backtest Report</title>
         <style>
             body {{
                 font-family: Arial;
-                margin: 40px;
+                background: #111;
+                color: #eee;
+                padding: 20px;
             }}
-            .metric {{
-                margin: 10px 0;
-                font-size: 16px;
+            table {{
+                border-collapse: collapse;
+                width: 400px;
             }}
-            img {{
-                width: 900px;
-                border: 1px solid #ddd;
+            td {{
+                border: 1px solid #333;
+                padding: 8px;
             }}
         </style>
     </head>
-
     <body>
-
-        <h1>Trading Strategy Backtest Report</h1>
-
-        <h2>Metrics</h2>
-        <div class="metric">Sharpe: {metrics['sharpe']:.3f}</div>
-        <div class="metric">Total Return: {metrics['total_return']:.3f}</div>
-        <div class="metric">Max Drawdown: {metrics['max_drawdown']:.3f}</div>
-        <div class="metric">Win Rate: {metrics['win_rate']:.3f}</div>
-
-        <h2>Equity Curve</h2>
-        <img src="data:image/png;base64,{img_b64}" />
-
+        <h2>Performance Metrics</h2>
+        <table>
+            {rows}
+        </table>
     </body>
     </html>
     """
-
-    with open(output_file, "w") as f:
-        f.write(html)
-
-    print(f"[REPORT SAVED] {output_file}")

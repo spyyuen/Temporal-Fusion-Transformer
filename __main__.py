@@ -5,7 +5,8 @@ from ingest_macro_data import build_macro_dataset, build_fx_dataset
 from temporal_fusion_transformer import train_tft
 from datetime import datetime, timedelta
 from backtest import backtest_pipeline
-from report import generate_report
+from report import generate_html_report, metrics_html
+
 
 # -----------------------------
 # DEFAULT CONFIG
@@ -74,8 +75,6 @@ def main():
             epochs=20
         )
 
-        print(result.tail())
-
 
     # -----------------------------
     # Backtest
@@ -84,7 +83,12 @@ def main():
     future_returns = result["returns"]
     bt_df, metrics = backtest_pipeline(preds, future_returns)
 
-    generate_report(bt_df, metrics)
+
+    generate_html_report(bt_df, metrics, output="backtest_report.html")
+
+    # Metrics table HTML
+    with open("metrics.html", "w") as f:
+        f.write(metrics_html(metrics))
 
 if __name__ == "__main__":
     main()
