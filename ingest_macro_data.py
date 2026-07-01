@@ -422,6 +422,7 @@ def build_macro_dataset(
     # Cleanup
     # -------------------------------------------------
 
+    print(f"Rows len before dropna: {len(merged):,}")
     merged = (
         merged
         .replace(

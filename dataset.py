@@ -194,13 +194,27 @@ def build_dataset(fx, macro, max_rows: int = 1_000_000):
     # -------------------------------------------------
     # merge_asof (fixed + safe)
     # -------------------------------------------------
+    fx = fx.copy()
+    macro = macro.copy()
 
+    fx["timestamp"] = pd.to_datetime(fx["timestamp"], utc=True)
+    macro["timestamp"] = pd.to_datetime(macro["timestamp"], utc=True)
+    # FORCE IDENTICAL TIMESTAMP TYPE (CRITICAL FIX)
+    fx["timestamp"] = pd.to_datetime(fx["timestamp"], utc=True).astype("datetime64[ns, UTC]")
+    macro["timestamp"] = pd.to_datetime(macro["timestamp"], utc=True).astype("datetime64[ns, UTC]")
+
+    # sanity check (optional but useful)
+    assert fx["timestamp"].dtype == macro["timestamp"].dtype
+    macro["timestamp"] = macro["timestamp"].dt.floor("D")
+
+    print('fx ', fx)
+    print('macro ', macro)
     df = pd.merge_asof(
-        fx,
-        macro,
+        fx.sort_values("timestamp"),
+        macro.sort_values("timestamp"),
         on="timestamp",
         direction="backward",
-        allow_exact_matches=True,
+        tolerance=pd.Timedelta("1D")
     )
 
     df = df.dropna(subset=["timestamp"])
@@ -209,7 +223,18 @@ def build_dataset(fx, macro, max_rows: int = 1_000_000):
     # -----------------------------
     # FX mid + returns
     # -----------------------------
-    df["mid"] = (df["bid"] + df["ask"]) / 2
+    if "bid" in df.columns and "ask" in df.columns:
+        df["mid"] = (df["bid"] + df["ask"]) / 2
+
+    elif "close" in df.columns:
+        df["mid"] = df["close"]
+
+    else:
+        raise ValueError(
+            f"FX dataset must contain either "
+            f"(bid, ask) or close. Found: {df.columns}"
+        )
+
     df["return"] = df["mid"].pct_change()
 
     # -----------------------------
