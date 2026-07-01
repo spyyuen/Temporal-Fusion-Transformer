@@ -422,16 +422,12 @@ def build_macro_dataset(
     # Cleanup
     # -------------------------------------------------
 
-    print(f"Rows len before dropna: {len(merged):,}")
-    merged = (
-        merged
-        .replace(
-            [np.inf, -np.inf],
-            np.nan,
-        )
-        .ffill()
-        .dropna()
-    )
+    pd.set_option('display.max_columns', None)
+
+    #Fix for rolling stats that are nan
+    merged = merged.dropna(subset=["spx", "vix", "dxy"])
+    merged = merged.ffill()
+    merged = merged.fillna(0)
 
     merged.to_parquet(
         outfile,
