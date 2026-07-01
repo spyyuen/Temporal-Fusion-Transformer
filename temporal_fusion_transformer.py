@@ -306,4 +306,27 @@ def train_tft(fx_path, macro_path, seq_len=120, epochs=20):
 
     model = train_model(X, y, seq_len=seq_len, epochs=epochs)
 
-    return model, X
+    # after training
+    model = train_model(X, y, seq_len=seq_len, epochs=epochs)
+
+    # -----------------------------
+    # generate in-sample predictions
+    # -----------------------------
+    model.eval()
+
+    X_seq, _ = build_sequences(X, y, seq_len=seq_len)
+
+    X_tensor = torch.tensor(X_seq, dtype=torch.float32)
+
+    with torch.no_grad():
+        preds = model(X_tensor).cpu().numpy().flatten()
+
+    # align lengths (important for backtest)
+    aligned_returns = y.iloc[-len(preds):].values
+    aligned_features = X.iloc[-len(preds):]
+
+    return model, {
+        "predictions": preds,
+        "returns": aligned_returns,
+        "features": aligned_features
+    }

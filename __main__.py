@@ -76,14 +76,12 @@ def main():
 
         print(result.tail())
 
-    preds = result["predictions"].detach().cpu().numpy().flatten()
-    df = result["df"]
 
     # -----------------------------
     # Backtest
     # -----------------------------
-    future_returns = df["return"].values
-
+    preds = result["predictions"]
+    future_returns = result["returns"]
     bt_df, metrics = backtest_pipeline(preds, future_returns)
 
     generate_report(bt_df, metrics)
