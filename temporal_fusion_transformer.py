@@ -5,55 +5,42 @@ import torch.nn as nn
 
 
 # =====================================================
+# TIME NORMALISATION (CRITICAL FIX)
+# =====================================================
+
+def _normalize_timestamp(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+
+    df["timestamp"] = pd.to_datetime(
+        df["timestamp"],
+        utc=True,
+        errors="coerce"
+    )
+
+    # FORCE CONSISTENT RESOLUTION (fix ms vs us crash)
+    df["timestamp"] = df["timestamp"].dt.floor("min")
+
+    df = df.dropna(subset=["timestamp"])
+    df = df.sort_values("timestamp")
+
+    return df
+
+
+# =====================================================
 # SAFE DATA LOADING
 # =====================================================
 
 def load_data(fx_path: str, macro_path: str, max_rows: int = 2_000_000):
 
     fx = pd.read_parquet(fx_path)
-    fx = (
-        fx.set_index("timestamp")
-        .resample("1min")
-        .agg({
-            "bid": "last",
-            "ask": "last"
-        })
-        .dropna()
-        .reset_index()
-    )
-    # Keep every 100th tick
-    #fx = fx.iloc[::100].reset_index(drop=True)
-
     macro = pd.read_parquet(macro_path)
 
-    # -------------------------------------------------
-    # Fix timestamps safely (your crash fix)
-    # -------------------------------------------------
-
-    fx["timestamp"] = pd.to_datetime(
-        fx["timestamp"],
-        utc=True,
-        format="mixed",
-        errors="coerce",
-    )
-
-    macro["timestamp"] = pd.to_datetime(
-        macro["timestamp"],
-        utc=True,
-        format="mixed",
-        errors="coerce",
-    )
-
-    fx = fx.dropna(subset=["timestamp"])
-    macro = macro.dropna(subset=["timestamp"])
-
-    fx = fx.sort_values("timestamp")
-    macro = macro.sort_values("timestamp")
+    fx = _normalize_timestamp(fx)
+    macro = _normalize_timestamp(macro)
 
     # -------------------------------------------------
-    # IMPORTANT: downsample to avoid OOM (SIGKILL fix)
+    # Downsample for safety
     # -------------------------------------------------
-
     if len(fx) > max_rows:
         fx = fx.iloc[:: max(1, len(fx) // max_rows)]
 
@@ -61,15 +48,20 @@ def load_data(fx_path: str, macro_path: str, max_rows: int = 2_000_000):
         macro = macro.iloc[:: max(1, len(macro) // max_rows)]
 
     # -------------------------------------------------
-    # merge_asof (fixed + safe)
+    # CRITICAL: ensure identical dtype before merge_asof
     # -------------------------------------------------
+    fx["timestamp"] = fx["timestamp"].astype("datetime64[ns, UTC]")
+    macro["timestamp"] = macro["timestamp"].astype("datetime64[ns, UTC]")
 
+    # -------------------------------------------------
+    # MERGE
+    # -------------------------------------------------
     df = pd.merge_asof(
-        fx,
-        macro,
+        fx.sort_values("timestamp"),
+        macro.sort_values("timestamp"),
         on="timestamp",
         direction="backward",
-        allow_exact_matches=True,
+        tolerance=pd.Timedelta("1D"),
     )
 
     df = df.dropna(subset=["timestamp"])
@@ -78,99 +70,84 @@ def load_data(fx_path: str, macro_path: str, max_rows: int = 2_000_000):
 
 
 # =====================================================
-# FEATURE ENGINEERING (FIXED SAFE VERSION)
+# FEATURE ENGINEERING
 # =====================================================
 
 def create_features(df: pd.DataFrame):
 
     df = df.copy()
 
-    # -------------------------------------------------
-    # FX mid
-    # -------------------------------------------------
-
+    # -----------------------------
+    # MID PRICE (robust)
+    # -----------------------------
     if "bid" in df.columns and "ask" in df.columns:
         df["mid"] = (df["bid"] + df["ask"]) / 2
+    elif "close" in df.columns:
+        df["mid"] = df["close"]
     else:
-        df["mid"] = df.get("close", 0)
-
+        raise ValueError("No price column found")
 
     df["return"] = df["mid"].pct_change()
 
     feature_cols = []
 
-    # -------------------------------------------------
-    # FX LAGS
-    # -------------------------------------------------
-
+    # -----------------------------
+    # LAGS
+    # -----------------------------
     for lag in [1, 2, 3, 5, 10]:
         col = f"ret_lag_{lag}"
         df[col] = df["return"].shift(lag)
         feature_cols.append(col)
 
-    # -------------------------------------------------
-    # VOL
-    # -------------------------------------------------
-
+    # -----------------------------
+    # VOLATILITY
+    # -----------------------------
     df["vol_20"] = df["return"].rolling(20).std()
     df["vol_100"] = df["return"].rolling(100).std()
-
     feature_cols += ["vol_20", "vol_100"]
 
-    # -------------------------------------------------
-    # SPREAD (safe)
-    # -------------------------------------------------
+    # -----------------------------
+    # SPREAD
+    # -----------------------------
+    if "bid" in df.columns and "ask" in df.columns:
+        df["spread"] = df["ask"] - df["bid"]
+    else:
+        df["spread"] = 0
 
-    df["spread"] = df.get("ask", 0) - df.get("bid", 0)
     feature_cols.append("spread")
 
-    # -------------------------------------------------
-    # EQUITIES (SAFE GUARDS)
-    # -------------------------------------------------
-
-    if "spx" in df.columns:
-        df["spx_ret"] = df["spx"].pct_change()
-    else:
-        df["spx_ret"] = 0
-
-    if "eustoxx" in df.columns:
-        df["eu_ret"] = df["eustoxx"].pct_change()
-    else:
-        df["eu_ret"] = 0
+    # -----------------------------
+    # EQUITIES SAFE
+    # -----------------------------
+    df["spx_ret"] = df.get("spx", pd.Series(0)).pct_change().fillna(0)
+    df["eu_ret"] = df.get("eustoxx", pd.Series(0)).pct_change().fillna(0)
 
     df["equity_relative"] = df["eu_ret"] - df["spx_ret"]
 
     feature_cols += ["spx_ret", "eu_ret", "equity_relative"]
 
-    # -------------------------------------------------
-    # VIX
-    # -------------------------------------------------
-
-    df["vix_change"] = df.get("vix", pd.Series(0)).pct_change()
+    # -----------------------------
+    # VIX SAFE
+    # -----------------------------
+    df["vix_change"] = df.get("vix", pd.Series(0)).pct_change().fillna(0)
     feature_cols.append("vix_change")
 
-    # -------------------------------------------------
-    # RATES (FIXED bund2y crash)
-    # -------------------------------------------------
-
-    # SAFE fallback: only use what exists
-    df["ust2y"] = df.get("us2y", 0)
-
+    # -----------------------------
+    # RATES SAFE
+    # -----------------------------
     df["yield_spread"] = df.get("yield_curve", 0)
     feature_cols.append("yield_spread")
 
-    # -------------------------------------------------
-    # DXY
-    # -------------------------------------------------
-
-    df["dxy_ret"] = df.get("dxy", pd.Series(0)).pct_change()
+    # -----------------------------
+    # DXY SAFE
+    # -----------------------------
+    df["dxy_ret"] = df.get("dxy", pd.Series(0)).pct_change().fillna(0)
     feature_cols.append("dxy_ret")
 
-    # -------------------------------------------------
-    # TIME FEATURES (FIXED timestamp handling)
-    # -------------------------------------------------
-
-    hour = pd.to_datetime(df["timestamp"], errors="coerce").dt.hour.fillna(0)
+    # -----------------------------
+    # TIME FEATURES
+    # -----------------------------
+    hour = df["timestamp"].dt.hour.fillna(0)
 
     df["hour_sin"] = np.sin(2 * np.pi * hour / 24)
     df["hour_cos"] = np.cos(2 * np.pi * hour / 24)
@@ -178,39 +155,43 @@ def create_features(df: pd.DataFrame):
     feature_cols += ["hour_sin", "hour_cos"]
 
     # =================================================
-    # TARGET (STABLE)
+    # TARGET
     # =================================================
-
     future_return = df["mid"].shift(-15) / df["mid"] - 1
-    future_vol = df["return"].rolling(60).std()
+    vol = df["return"].rolling(60).std()
 
-    df["target"] = future_return / (future_vol + 1e-6)
+    df["target"] = future_return / (vol + 1e-6)
 
+    # =================================================
+    # FINAL CLEANING (CRITICAL FIX)
+    # =================================================
     dataset = df[feature_cols + ["target"]].replace(
-        [np.inf, -np.inf],
-        np.nan,
+        [np.inf, -np.inf], np.nan
     ).dropna()
+
+    if len(dataset) == 0:
+        raise ValueError(
+            "Dataset collapsed to 0 rows. "
+            "Check macro coverage or merge alignment."
+        )
 
     return dataset[feature_cols], dataset["target"]
 
 
 # =====================================================
-# SEQUENCES (MEMORY SAFE)
+# SEQUENCES
 # =====================================================
 
-def build_sequences(X, y, seq_len=120, max_samples=200_000):
+def build_sequences(X, y, seq_len=120):
 
-    values = X.values.astype(np.float32)
-    target = y.values.astype(np.float32)
+    X = X.values.astype(np.float32)
+    y = y.values.astype(np.float32)
 
     xs, ys = [], []
 
-    start = max(0, len(X) - max_samples)
-
-    for i in range(start + seq_len, len(X)):
-
-        xs.append(values[i - seq_len:i])
-        ys.append(target[i])
+    for i in range(seq_len, len(X)):
+        xs.append(X[i - seq_len:i])
+        ys.append(y[i])
 
     return np.array(xs, dtype=np.float32), np.array(ys, dtype=np.float32)
 
@@ -230,22 +211,21 @@ class AlphaTransformer(nn.Module):
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
-            batch_first=True,
+            batch_first=True
         )
 
         self.encoder = nn.TransformerEncoder(
             encoder_layer,
-            num_layers=layers,
+            num_layers=layers
         )
 
         self.head = nn.Sequential(
             nn.Linear(d_model, 32),
             nn.ReLU(),
-            nn.Linear(32, 1),
+            nn.Linear(32, 1)
         )
 
     def forward(self, x):
-
         x = self.input_proj(x)
         x = self.encoder(x)
         x = x[:, -1, :]
@@ -258,34 +238,33 @@ class AlphaTransformer(nn.Module):
 
 def train_model(X, y, seq_len=120, epochs=20):
 
-    X_seq, y_seq = build_sequences(
-        X,
-        y,
-        seq_len=seq_len
-    )
+    X_seq, y_seq = build_sequences(X, y, seq_len)
+
+    if len(X_seq) == 0:
+        raise ValueError("No sequences generated")
 
     X_tensor = torch.tensor(X_seq, dtype=torch.float32)
     y_tensor = torch.tensor(y_seq.reshape(-1, 1), dtype=torch.float32)
 
     model = AlphaTransformer(input_dim=X.shape[1])
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    opt = torch.optim.AdamW(model.parameters(), lr=1e-4)
     loss_fn = nn.HuberLoss()
 
     for epoch in range(epochs):
 
-        optimizer.zero_grad()
+        opt.zero_grad()
 
         preds = model(X_tensor)
-
         loss = loss_fn(preds, y_tensor)
 
         loss.backward()
-        optimizer.step()
+        opt.step()
 
         print(epoch, loss.item())
 
     return model
+
 
 # =====================================================
 # SIGNALS
@@ -293,58 +272,37 @@ def train_model(X, y, seq_len=120, epochs=20):
 
 def generate_signals(model, X, seq_len=120):
 
-    X_seq, _ = build_sequences(
-        X,
-        pd.Series(np.zeros(len(X))),
-        seq_len,
-    )
+    X_seq, _ = build_sequences(X, pd.Series(np.zeros(len(X))), seq_len)
 
     with torch.no_grad():
-        pred = model(torch.tensor(X_seq)).numpy().flatten()
+        preds = model(torch.tensor(X_seq)).numpy().flatten()
 
-    return np.where(pred > 1, 1, np.where(pred < -1, -1, 0))
+    return np.where(preds > 1, 1, np.where(preds < -1, -1, 0))
 
 
 # =====================================================
-# RUN ENTRYPOINT (USED BY __main__.py)
+# ENTRYPOINT
 # =====================================================
-def run(fx_path, macro_path, seq_len=120, epochs=20):
 
-    import pandas as pd
-    from dataset import build_dataset
-    from model import train_model   # or wherever your model is
+def train_tft(fx_path, macro_path, seq_len=120, epochs=20):
 
     print("[RUN] Loading datasets...")
 
-    fx = pd.read_parquet(fx_path)
-    macro = pd.read_parquet(macro_path)
+    df = load_data(fx_path, macro_path)
 
     print("[RUN] Building features + target...")
 
-    X, y = build_dataset(fx, macro)
+    X, y = create_features(df)
 
-    print(f"[RUN] Dataset size: {len(X):,} rows")
+    print(f"[RUN] Dataset size: {len(X):,}")
 
-    # -----------------------------
-    # SAFETY LIMIT (IMPORTANT)
-    # -----------------------------
-    MAX_ROWS = 1_000_000
-
-    if len(X) > MAX_ROWS:
-        print(f"[WARN] Downsampling from {len(X):,} → {MAX_ROWS:,}")
-        X = X.iloc[-MAX_ROWS:]
-        y = y.iloc[-MAX_ROWS:]
+    if len(X) == 0:
+        raise ValueError("Empty dataset after feature engineering")
 
     print("[RUN] Training model...")
 
     print("[DEBUG] X shape:", X.shape)
     print("[DEBUG] y shape:", y.shape)
-
-    if len(X) == 0:
-        raise ValueError(
-            "Empty dataset after feature engineering. "
-            "Check merge_asof alignment + timestamp format."
-        )
 
     model = train_model(X, y, seq_len=seq_len, epochs=epochs)
 

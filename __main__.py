@@ -2,7 +2,7 @@ import argparse
 from pathlib import Path
 
 from ingest_macro_data import build_macro_dataset, build_fx_dataset
-from temporal_fusion_transformer import run as train_tft
+from temporal_fusion_transformer import train_tft
 from datetime import datetime, timedelta
 from backtest import backtest_pipeline
 from report import generate_report
