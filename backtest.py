@@ -3,125 +3,85 @@ import pandas as pd
 
 
 # =====================================================
-# BASIC BACKTEST ENGINE (FX STYLE)
+# SIGNAL PROCESSING (NO LOOKAHEAD SAFE)
 # =====================================================
 
-def run_backtest(
-        signals: np.ndarray,
-        returns: np.ndarray,
-        transaction_cost: float = 0.00002
-):
+def prepare_signals(preds: np.ndarray, threshold: float = 0.0):
     """
-    Simple vectorized backtest.
+    Converts model predictions into trading signals safely.
 
-    signals:
-        -1 short
-         0 flat
-         1 long
-
-    returns:
-        future returns aligned with signals
+    IMPORTANT:
+    - shift signals by 1 to avoid lookahead bias
     """
 
-    signals = np.asarray(signals).astype(np.float32)
-    returns = np.asarray(returns).astype(np.float32)
+    preds = np.asarray(preds).flatten()
+
+    signals = np.where(preds > threshold, 1, -1)
+
+    # shift to avoid using same-bar info
+    signals = np.roll(signals, 1)
+    signals[0] = 0
+
+    return signals.astype(np.float32)
+
+
+# =====================================================
+# BACKTEST ENGINE (SAFE)
+# =====================================================
+
+def run_backtest(signals, returns, transaction_cost=0.00002):
+
+    signals = np.asarray(signals, dtype=np.float32)
+    returns = np.asarray(returns, dtype=np.float32)
 
     if len(signals) != len(returns):
-        raise ValueError("signals and returns must match length")
+        n = min(len(signals), len(returns))
+        signals = signals[:n]
+        returns = returns[:n]
 
-    # -------------------------------------------------
-    # POSITION CHANGES (for costs)
-    # -------------------------------------------------
-
+    # position changes → cost
     position_change = np.abs(np.diff(np.insert(signals, 0, 0)))
-
     costs = position_change * transaction_cost
 
-    # -------------------------------------------------
-    # STRATEGY RETURNS
-    # -------------------------------------------------
+    strat_returns = signals * returns - costs
+    equity = np.cumsum(strat_returns)
 
-    strategy_returns = signals * returns
-
-    strategy_returns = strategy_returns - costs
-
-    equity_curve = np.cumsum(strategy_returns)
-
-    return strategy_returns, equity_curve
+    return strat_returns, equity
 
 
 # =====================================================
 # METRICS
 # =====================================================
 
-def compute_metrics(strategy_returns: np.ndarray):
+def compute_metrics(strategy_returns):
 
-    strategy_returns = np.asarray(strategy_returns)
+    r = np.asarray(strategy_returns)
 
-    mean = np.mean(strategy_returns)
-    std = np.std(strategy_returns) + 1e-12
+    mean = np.mean(r)
+    std = np.std(r) + 1e-12
 
-    sharpe = mean / std * np.sqrt(252 * 96)  # approx 15-min bars
+    sharpe = (mean / std) * np.sqrt(252)
 
-    equity = np.cumsum(strategy_returns)
-
-    drawdown = equity - np.maximum.accumulate(equity)
-
-    max_dd = np.min(drawdown)
-
-    win_rate = np.mean(strategy_returns > 0)
+    equity = np.cumsum(r)
+    peak = np.maximum.accumulate(equity)
+    drawdown = equity - peak
 
     return {
         "sharpe": float(sharpe),
-        "max_drawdown": float(max_dd),
-        "win_rate": float(win_rate),
-        "total_return": float(equity[-1])
+        "total_return": float(equity[-1]),
+        "max_drawdown": float(np.min(drawdown)),
+        "win_rate": float(np.mean(r > 0))
     }
 
 
 # =====================================================
-# POSITION SIZING WRAPPER (OPTIONAL)
+# FULL PIPELINE
 # =====================================================
 
-def apply_position_sizing(
-        signals: np.ndarray,
-        realized_vol: np.ndarray,
-        target_vol: float = 0.1
-):
-    """
-    Volatility-targeted position sizing.
-    """
+def backtest_pipeline(preds, future_returns):
 
-    signals = np.asarray(signals).astype(np.float32)
-    realized_vol = np.asarray(realized_vol).astype(np.float32)
-
-    scaled = signals * (target_vol / (realized_vol + 1e-8))
-
-    # clip extreme leverage
-    scaled = np.clip(scaled, -5, 5)
-
-    return scaled
-
-
-# =====================================================
-# FULL BACKTEST PIPELINE
-# =====================================================
-
-def backtest_pipeline(
-        signals,
-        future_returns,
-        realized_vol=None,
-        use_position_sizing=False
-):
-
-    signals = np.asarray(signals)
-    future_returns = np.asarray(future_returns)
-
-    if use_position_sizing and realized_vol is not None:
-        signals = apply_position_sizing(signals, realized_vol)
-
+    signals = prepare_signals(preds)
     strat_ret, equity = run_backtest(signals, future_returns)
-
     metrics = compute_metrics(strat_ret)
 
     df = pd.DataFrame({
@@ -129,9 +89,5 @@ def backtest_pipeline(
         "equity_curve": equity,
         "signal": signals
     })
-
-    print("\n=== BACKTEST RESULTS ===")
-    for k, v in metrics.items():
-        print(f"{k}: {v:.6f}")
 
     return df, metrics

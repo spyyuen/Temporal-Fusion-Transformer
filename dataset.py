@@ -235,7 +235,9 @@ def build_dataset(fx, macro, max_rows: int = 1_000_000):
             f"(bid, ask) or close. Found: {df.columns}"
         )
 
-    df["return"] = df["mid"].pct_change()
+    # IMPORTANT: Avoid lookahead bias created by df["return"] = df["mid"].pct_change()
+    df["return"] = df["close"].pct_change().shift(-1)
+    df = df.dropna()
 
     # -----------------------------
     # TARGET (15-min ahead return)

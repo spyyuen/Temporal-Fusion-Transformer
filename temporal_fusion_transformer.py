@@ -94,6 +94,7 @@ def create_features(df: pd.DataFrame):
     else:
         df["mid"] = df.get("close", 0)
 
+
     df["return"] = df["mid"].pct_change()
 
     feature_cols = []

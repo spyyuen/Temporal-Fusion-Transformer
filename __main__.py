@@ -4,6 +4,8 @@ from pathlib import Path
 from ingest_macro_data import build_macro_dataset, build_fx_dataset
 from temporal_fusion_transformer import run as train_tft
 from datetime import datetime, timedelta
+from backtest import backtest_pipeline
+from report import generate_report
 
 # -----------------------------
 # DEFAULT CONFIG
@@ -32,7 +34,7 @@ def main():
 
     # NEW: date arguments
     parser.add_argument("--start", type=str, required=True, help="Start date of format YYYY-MM-DD")
-    parser.add_argument("--end", type=str, default=(datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%d"), help="End date in format YYYY-MM-DD (default: yesterday)")
+    parser.add_argument("--end", type=str, default=(datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"), help="End date in format YYYY-MM-DD (default: yesterday)")
 
     args = parser.parse_args()
 
@@ -74,6 +76,17 @@ def main():
 
         print(result.tail())
 
+    preds = result["predictions"].detach().cpu().numpy().flatten()
+    df = result["df"]
+
+    # -----------------------------
+    # Backtest
+    # -----------------------------
+    future_returns = df["return"].values
+
+    bt_df, metrics = backtest_pipeline(preds, future_returns)
+
+    generate_report(bt_df, metrics)
 
 if __name__ == "__main__":
     main()
